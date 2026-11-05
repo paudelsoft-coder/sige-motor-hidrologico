@@ -1,0 +1,46 @@
+name: Motor hidrológico SIGE
+
+on:
+  schedule:
+    - cron: "23 * * * *"     # cada hora: alturas del INA + pronóstico + cruces
+    - cron: "10 6 * * 1"     # lunes 03:10 (Argentina): recalibración con 3 años
+  workflow_dispatch:
+    inputs:
+      tarea:
+        description: "ingesta | represas | pronostico | calibrar | transito | todo | primera-carga"
+        default: "todo"
+
+concurrency:
+  group: motor
+  cancel-in-progress: false
+
+jobs:
+  motor:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Primera carga (3 años de alturas) y calibración
+        if: github.event.inputs.tarea == 'primera-carga'
+        run: |
+          python -m motor ingesta --dias 1100
+          python -m motor represas --desde 2023
+          python -m motor calibrar
+          python -m motor pronostico
+      - name: Recalibrar (lunes)
+        if: github.event.schedule == '10 6 * * 1' || github.event.inputs.tarea == 'calibrar'
+        run: |
+          python -m motor calibrar
+          python -m motor transito
+      - name: Alturas + pronóstico (cada hora)
+        if: github.event.schedule == '23 * * * *' || github.event.inputs.tarea == 'todo' || github.event.inputs.tarea == ''
+        run: python -m motor todo
+      - name: Tarea puntual
+        if: contains(fromJSON('["ingesta","represas","pronostico","transito"]'), github.event.inputs.tarea)
+        run: python -m motor ${{ github.event.inputs.tarea }}
