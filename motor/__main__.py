@@ -70,14 +70,26 @@ def rapida(dias=3):
     return True
 
 
+DESCARTADAS = {}   # {estacion_id: {fecha: altura}} lecturas que el control de calidad dejó afuera en esta corrida
+
+
 def _series_supa(dias):
-    """Alturas por estación y, como entrada extra (id 1000), la descarga de Itaipú en miles de m³/s."""
+    """Alturas por estación (depuradas) y, como entrada extra (id 1000), la descarga de Itaipú en miles de m³/s.
+    Las alturas quedan guardadas tal cual las publica el INA; la depuración se hace al leerlas."""
     from . import supa
     from .calibrar import ITAIPU_ID
-    desde = (dt.date.today() - dt.timedelta(days=dias)).isoformat()
+    desde = (dt.date.today() - dt.timedelta(days=max(dias, 400))).isoformat()   # ≥ 400 días para conocer el salto creíble
+    corte = (dt.date.today() - dt.timedelta(days=dias)).isoformat()
     S = {}
     for r in supa.select("sige_hidro_alturas", {"select": "estacion_id,fecha,altura_m", "fecha": f"gte.{desde}", "order": "fecha"}):
-        S.setdefault(r["estacion_id"], {})[r["fecha"]] = r["altura_m"]
+        S.setdefault(r["estacion_id"], {})[r["fecha"]] = float(r["altura_m"])
+    DESCARTADAS.clear()
+    for k in list(S):
+        limpia, _ = nucleo.depurar(S[k])
+        limpia, malas = nucleo.depurar(S[k], nucleo.salto_tipico(limpia))
+        S[k] = {f: v for f, v in limpia.items() if f >= corte}
+        if malas:
+            DESCARTADAS[k] = malas
     for r in supa.select("sige_hidro_represas", {"select": "fecha,defluente_m3s", "represa": "eq.ITAIPU", "fecha": f"gte.{desde}"}):
         if r["defluente_m3s"] is not None:
             S.setdefault(ITAIPU_ID, {})[r["fecha"]] = r["defluente_m3s"] / 1000
@@ -138,8 +150,13 @@ def pronostico():
     supa.insertar("sige_hidro_pronostico", pron)
     supa.borrar("sige_hidro_cruces", {"estacion_id": "gte.0"})
     supa.insertar("sige_hidro_cruces", cru)
-    supa.insertar("sige_hidro_corridas", [{"tarea": "pronostico", "filas": len(pron), "fallos": []}])
+    recientes = [f"{k} {f}={v}" for k, m in DESCARTADAS.items() for f, v in m.items()
+                 if f >= (dt.date.today() - dt.timedelta(days=10)).isoformat()]
+    supa.insertar("sige_hidro_corridas", [{"tarea": "pronostico", "filas": len(pron),
+                                           "fallos": [f"dato descartado por control de calidad: {x}" for x in recientes]}])
     print(f"pronostico: {len(pron)} filas, {len(cru)} cruces")
+    for x in recientes:
+        print("  - dato descartado por control de calidad:", x)
 
 
 def transito():
