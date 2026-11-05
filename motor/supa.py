@@ -6,6 +6,7 @@ Variables de entorno (en GitHub: Settings › Secrets and variables › Actions)
 """
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -21,8 +22,11 @@ def _req(method, path, body=None, headers=None, params=None):
     h.update(headers or {})
     data = json.dumps(body, default=str).encode() if body is not None else None
     req = urllib.request.Request(f"{URL}/rest/v1/{path}{q}", data=data, method=method, headers=h)
-    with urllib.request.urlopen(req, timeout=120) as r:
-        txt = r.read().decode() or "null"
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            txt = r.read().decode() or "null"
+    except urllib.error.HTTPError as ex:
+        raise RuntimeError(f"Supabase {method} {path}: {ex.code} {ex.read().decode(errors='replace')[:500]}") from None
     return json.loads(txt)
 
 
