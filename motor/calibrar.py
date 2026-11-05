@@ -23,6 +23,11 @@ VENTANAS = [(0, 3), (0, 7), (7, 14)]   # últimos 3 días, última semana y sema
 ITAIPU_ID = 1000
 
 
+def cuenca(e):
+    """Paraná y Paraguay forman una sola red (el Paraguay entra al Paraná); el Uruguay es otra."""
+    return "URUGUAY" if e["rio"].startswith("Uruguay") else "PARANA"
+
+
 def diaria(serie: dict, d0: dt.date, d1: dt.date):
     """Arreglo diario continuo; huecos de hasta 5 días se interpolan, más largos quedan NaN."""
     n = (d1 - d0).days + 1
@@ -115,7 +120,7 @@ def calibrar(estaciones: list, series: dict, hasta: dt.date, anios: int = 3, log
         did = e["id"]
         if np.isnan(S[did]).mean() > 0.4:
             log(f"{e['nombre']}: pocos datos, sin modelo"); continue
-        cands = [u["id"] for u in est if u["orden"] <= e["orden"] and e["orden"] - u["orden"] <= VENTANA and np.isnan(S[u["id"]]).mean() < 0.4]
+        cands = [u["id"] for u in est if cuenca(u) == cuenca(e) and u["orden"] <= e["orden"] and e["orden"] - u["orden"] <= VENTANA and np.isnan(S[u["id"]]).mean() < 0.4]
         if e["rio"].startswith("Paraná"):
             cands += [k for k in extras if np.isnan(S[k]).mean() < 0.4]
         pool = [(s, a, b) for s in cands for a, b in VENTANAS]
