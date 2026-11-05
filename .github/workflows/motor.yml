@@ -2,12 +2,14 @@ name: Motor hidrológico SIGE
 
 on:
   schedule:
-    - cron: "23 * * * *"     # cada hora: alturas del INA + pronóstico + cruces
+    - cron: "*/10 10-15 * * *"        # 07:00 a 12:50 (Argentina), cada 10 min: el INA carga las alturas del día
+    - cron: "7 0-9,16-23 * * *"       # resto del día, cada hora: correcciones tardías
+    - cron: "41 13 * * *"             # 10:41 (Argentina): todo (40 días de alturas + represas + pronóstico)
     - cron: "10 6 * * 1"     # lunes 03:10 (Argentina): recalibración con 3 años
   workflow_dispatch:
     inputs:
       tarea:
-        description: "ingesta | represas | pronostico | calibrar | transito | todo | primera-carga"
+        description: "rapida | ingesta | represas | pronostico | calibrar | transito | todo | primera-carga"
         default: "todo"
 
 concurrency:
@@ -25,6 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
       - run: pip install -r requirements.txt
       - name: Primera carga (3 años de alturas) y calibración
         if: github.event.inputs.tarea == 'primera-carga'
@@ -38,8 +41,11 @@ jobs:
         run: |
           python -m motor calibrar
           python -m motor transito
-      - name: Alturas + pronóstico (cada hora)
-        if: github.event.schedule == '23 * * * *' || github.event.inputs.tarea == 'todo' || github.event.inputs.tarea == ''
+      - name: Revisión rápida (solo recalcula si el INA publicó datos nuevos)
+        if: github.event.schedule == '*/10 10-15 * * *' || github.event.schedule == '7 0-9,16-23 * * *' || github.event.inputs.tarea == 'rapida'
+        run: python -m motor rapida
+      - name: Alturas + represas + pronóstico (una vez por día)
+        if: github.event.schedule == '41 13 * * *' || github.event.inputs.tarea == 'todo' || github.event.inputs.tarea == ''
         run: python -m motor todo
       - name: Tarea puntual
         if: contains(fromJSON('["ingesta","represas","pronostico","transito"]'), github.event.inputs.tarea)
