@@ -6,7 +6,8 @@ Uso:
   python -m motor pronostico            proyección 15 días + cruces de nivel → sige_hidro_pronostico / sige_hidro_cruces
   python -m motor represas [--desde 2000]  caudales diarios de Itaipú y del Iguazú (ONS) → sige_hidro_represas
   python -m motor transito              desfases y reglas de represas (si hay datos en sige_hidro_represas)
-  python -m motor todo                  ingesta + pronostico
+  python -m motor todo                  ingesta + represas + pronostico
+  python -m motor rapida                solo si el INA publicó alturas nuevas: las guarda y recalcula el pronóstico
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
@@ -41,6 +42,32 @@ def ingesta(dias=40):
     print(f"ingesta: {len(filas)} lecturas, {len(fallos)} fallos")
     for f in fallos:
         print("  -", f)
+
+
+def rapida(dias=3):
+    """Revisión liviana (cada 10 minutos por la mañana): baja los últimos días del INA y solo guarda y recalcula
+    si apareció un dato nuevo o corregido. Así el portal no se recarga cuando no cambió nada."""
+    from . import ina, supa
+    hoy = dt.date.today()
+    desde, hasta = (hoy - dt.timedelta(days=dias)).isoformat(), (hoy + dt.timedelta(days=1)).isoformat()
+    antes = {(r["estacion_id"], r["fecha"]): round(float(r["altura_m"]), 3)
+             for r in supa.select("sige_hidro_alturas", {"select": "estacion_id,fecha,altura_m", "fecha": f"gte.{desde}"})}
+    nuevas, fallos = [], []
+    for e in estaciones():
+        try:
+            for f, v in ina.observaciones(e["serie_id"], desde, hasta, e.get("marea", False)).items():
+                if antes.get((e["id"], f)) != round(float(v), 3):
+                    nuevas.append({"estacion_id": e["id"], "fecha": f, "altura_m": v, "fuente": "INA"})
+        except Exception as ex:
+            fallos.append(f"{e['nombre']}: {ex}")
+        time.sleep(0.2)
+    if not nuevas:
+        print(f"rapida: sin datos nuevos ({len(fallos)} fallos)")
+        return False
+    supa.upsert("sige_hidro_alturas", nuevas, "estacion_id,fecha")
+    supa.insertar("sige_hidro_corridas", [{"tarea": "rapida", "filas": len(nuevas), "fallos": fallos}])
+    print(f"rapida: {len(nuevas)} lecturas nuevas o corregidas")
+    return True
 
 
 def _series_supa(dias):
@@ -175,6 +202,9 @@ if __name__ == "__main__":
         represas(int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--desde" else None)
     elif tarea == "prueba":
         prueba()
+    elif tarea == "rapida":
+        if rapida():
+            pronostico()
     else:
         ingesta()
         try:
