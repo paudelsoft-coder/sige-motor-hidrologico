@@ -80,6 +80,10 @@ def calibrar():
     print("calibrar:", len(modelo), "puertos con modelo")
 
 
+COLUMNAS_CRUCE = ("nivel", "tipo", "umbral", "momento", "desde_rango", "hasta_rango", "sale", "en_nivel_desde",
+                  "desde_antes_de_serie", "permanencia_h", "permanencia_minima")
+
+
 def _calcular(S, modelo, sube_7d):
     emitido = dt.datetime.now(nucleo.ART).isoformat(timespec="minutes")
     pron, cru = [], []
@@ -89,7 +93,10 @@ def _calcular(S, modelo, sube_7d):
             continue
         pron += [{"estacion_id": e["id"], "emitido": emitido, "dato_fecha": max(S[e["id"]]), **q} for q in proy]
         for ev in nucleo.cruces(S[e["id"]], proy, e["alerta"], e["evac"]):
-            cru.append({"estacion_id": e["id"], "emitido": emitido, **{k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in ev.items()}})
+            # PostgREST exige las mismas columnas en todas las filas de un lote
+            fila = {"estacion_id": e["id"], "emitido": emitido, **{k: None for k in COLUMNAS_CRUCE}}
+            fila.update({k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in ev.items()})
+            cru.append(fila)
     return pron, cru
 
 
