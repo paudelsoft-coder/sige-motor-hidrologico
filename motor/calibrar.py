@@ -142,7 +142,7 @@ def calibrar(estaciones: list, series: dict, hasta: dt.date, anios: int = 3, log
                 break
             elegidas.append(f); mejor, val = sc, v
         pers = _persistencia(S[did])
-        if val and sum(val[0][:7]) < sum(x for x in pers[:7] if x is not None):
+        if val and None not in val[0][:7] and sum(val[0][:7]) < sum(x for x in pers[:7] if x is not None):
             T, X, Y, _ = _tabla(S, did, elegidas)
             W = [[round(float(w), 4) for w in _ajustar(X, Y[:, k])] for k in range(H)]
             modelo[str(did)] = {"entradas": [{"id": s, "nombre": nombre[s], "desde": a, "hasta": b} for s, a, b in elegidas],
