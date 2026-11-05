@@ -1,0 +1,4 @@
+Required Notice: Copyright (c) 2026 Melisa Franzotti — Vigía del Paraná (https://vigia-del-parana.github.io)
+
+Partes de este motor (descarga del INA y método de proyección) están adaptadas de Vigía del Paraná y se usan bajo PolyForm Noncommercial License 1.0.0:
+https://polyformproject.org/licenses/noncommercial/1.0.0
