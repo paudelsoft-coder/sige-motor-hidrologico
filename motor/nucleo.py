@@ -178,3 +178,96 @@ def salto_tipico(serie):
     f=sorted(serie);ch=sorted(abs(serie[b]-serie[a]) for a,b in zip(f,f[1:]) if _dias(a,b)==1)
     if len(ch)<50: return None
     return round(max(1.0,1.5*ch[min(len(ch)-1,int(len(ch)*0.999))]),2)
+
+
+# ---------------------------------------------------------------------------------------------------
+# Situaciones parecidas en la historia (método de análogos): busca días del pasado con la misma altura,
+# la misma tendencia de la última semana y la misma época del año, y resume qué pasó después.
+# ---------------------------------------------------------------------------------------------------
+def _get(serie: dict, f: str, tol: int = 1):
+    for k in range(tol + 1):
+        for s in ((0,) if k == 0 else (-k, k)):
+            v = serie.get(sumar_dias(f, s))
+            if v is not None:
+                return v
+    return None
+
+
+def _cuantil(v: list, p: float):
+    v = sorted(x for x in v if x is not None)
+    return v[min(len(v) - 1, int(round((len(v) - 1) * p)))] if v else None
+
+
+def analogos(serie: dict, alerta: float, evac: float, n: int = 10, horizonte: int = 30):
+    """Devuelve (situacion, resumen, casos) o None si la historia es corta (< 10 años)."""
+    if len(serie) < 3650:
+        return None
+    f0 = max(serie)
+    h0 = serie[f0]
+    h7 = _get(serie, sumar_dias(f0, -7))
+    if h7 is None:
+        return None
+    c0 = h0 - h7
+    vals = sorted(serie.values())
+    rango = max(0.5, vals[int(len(vals) * 0.95)] - vals[int(len(vals) * 0.05)])
+    sh, sc = max(0.10, 0.04 * rango), max(0.08, 0.03 * rango)
+    doy0 = dt.date.fromisoformat(f0).timetuple().tm_yday
+    limite = sumar_dias(f0, -horizonte - 5)
+    cand = []
+    for f, h in serie.items():
+        if f > limite or abs(h - h0) > 2.5 * sh:
+            continue
+        a = _get(serie, sumar_dias(f, -7))
+        if a is None:
+            continue
+        c = h - a
+        if abs(c - c0) > 2.5 * sc:
+            continue
+        dd = abs(dt.date.fromisoformat(f).timetuple().tm_yday - doy0)
+        dd = min(dd, 365 - dd)
+        cand.append((((h - h0) / sh) ** 2 + ((c - c0) / sc) ** 2 + (dd / 60) ** 2 * 0.5, f, h, c))
+    cand.sort()
+    nivel = lambda x: 2 if x >= evac else 1 if x >= alerta else 0
+    mismo_nivel = [c for c in cand if nivel(c[2]) == nivel(h0)]
+    if len(mismo_nivel) >= 30:   # preferir casos en el mismo estado que hoy (normal / alerta / evacuación)
+        cand = mismo_nivel
+    elegidos = []
+    for d, f, h, c in cand:
+        if all(abs((dt.date.fromisoformat(f) - dt.date.fromisoformat(g)).days) > 30 for _, g, _, _ in elegidos):
+            futuro = [serie.get(sumar_dias(f, k)) for k in range(1, horizonte + 1)]
+            if sum(x is not None for x in futuro) >= horizonte * 0.7:
+                elegidos.append((d, f, h, c))
+        if len(elegidos) >= n:
+            break
+    if len(elegidos) < 3:
+        return {"f": f0, "h": h0, "c7": round(c0, 2)}, {"n": len(elegidos)}, []
+    casos = []
+    for d, f, h, c in elegidos:
+        fut = [(k, serie.get(sumar_dias(f, k))) for k in range(1, horizonte + 1)]
+        fut = [(k, x) for k, x in fut if x is not None]
+        mx = max(x for _, x in fut)
+        def primero(cond):
+            return next((k for k, x in fut if cond(x)), None)
+        casos.append({"f": f, "h": round(h, 2), "c7": round(c, 2), "max30": round(mx, 2), "min30": round(min(x for _, x in fut), 2),
+                      "fin30": round(fut[-1][1], 2),
+                      "baja_alerta": primero(lambda x: x < alerta) if h >= alerta else None,
+                      "baja_evac": primero(lambda x: x < evac) if h >= evac else None,
+                      "entra_alerta": primero(lambda x: x >= alerta) if h < alerta else None,
+                      "entra_evac": primero(lambda x: x >= evac) if h < evac else None})
+    # qué tan alto está hoy para la época: percentil entre todos los días ±15 de la misma fecha
+    mismo = [h for f, h in serie.items() if f < f0 and min(abs(dt.date.fromisoformat(f).timetuple().tm_yday - doy0),
+                                                            365 - abs(dt.date.fromisoformat(f).timetuple().tm_yday - doy0)) <= 15]
+    rareza = round(100 * sum(1 for h in mismo if h < h0) / len(mismo)) if mismo else None
+    def dist(campo):
+        v = [c[campo] for c in casos if c[campo] is not None]
+        aplica = [c for c in casos if (campo.startswith("baja") and c["h"] >= (alerta if "alerta" in campo else evac))
+                  or (campo.startswith("entra") and c["h"] < (alerta if "alerta" in campo else evac))]
+        return {"n": len(aplica), "si": len(v), "p25": _cuantil(v, .25), "p50": _cuantil(v, .5), "p75": _cuantil(v, .75)}
+    resumen = {"n": len(casos), "desde": min(serie)[:4], "rareza_pct": rareza,
+               "suben": sum(1 for c in casos if c["max30"] > c["h"] + 0.2),
+               "max30_p50": round(_cuantil([c["max30"] - c["h"] for c in casos], .5), 2),
+               "max30_p90": round(_cuantil([c["max30"] - c["h"] for c in casos], .9), 2),
+               "fin30_p50": round(_cuantil([c["fin30"] - c["h"] for c in casos], .5), 2),
+               "baja_alerta": dist("baja_alerta"), "baja_evac": dist("baja_evac"),
+               "entra_alerta": dist("entra_alerta"), "entra_evac": dist("entra_evac")}
+    return {"f": f0, "h": h0, "c7": round(c0, 2)}, resumen, casos
