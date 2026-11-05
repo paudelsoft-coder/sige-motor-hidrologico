@@ -120,3 +120,61 @@ def cruces(serie: dict, proy: list, alerta: float, evac: float):
                 if tp is not None:
                     ev.append({"nivel": nombre, "tipo": "POSIBLE", "umbral": nivel, "momento": tp})
     return ev
+
+
+# ---------------------------------------------------------------------------------------------------
+# Control de calidad de las lecturas (el INA publica tal cual lo que carga Prefectura: a veces hay ceros
+# de registros vacíos, valores intercambiados entre puertos o tipeos como 78,91 m en lugar de 7,89 m).
+# ---------------------------------------------------------------------------------------------------
+def _dias(a: str, b: str) -> int:
+    return (dt.date.fromisoformat(b) - dt.date.fromisoformat(a)).days
+
+
+def depurar(serie, salto_max=None):
+    """Quita lecturas imposibles y devuelve (serie_limpia, descartadas {fecha: valor}).
+    R0 ceros exactos cuando el río anda lejos de cero · R1 pico de un día que sale y vuelve al mismo nivel ·
+    R2 lectura muy lejos de la mediana de ±5 lecturas, salvo que el día contiguo la confirme (crecida real) ·
+    último dato: salto contra el anterior mayor que `salto_max` (lo máximo creíble para ese puerto)."""
+    f=sorted(serie)
+    if len(f)<8: return dict(serie),{}
+    v=[serie[x] for x in f]
+    d=sorted(abs(b-a) for a,b in zip(v,v[1:]))
+    mad=d[len(d)//2] or 0.01
+    thr=max(0.8,10*mad)
+    malas={}
+    while True:
+        idx=[i for i in range(len(f)) if f[i] not in malas]
+        peor=None
+        for j,i in enumerate(idx):
+            x=v[i]
+            w=[v[k] for k in idx[max(0,j-5):j]+idx[j+1:j+6]]
+            # R0: cero exacto (registro vacío) cuando el río anda lejos de cero
+            wn=[y for y in w if y!=0]
+            if x==0 and wn and sorted(abs(y) for y in wn)[len(wn)//2]>thr: peor=(1e9,i);break
+            if 0<j<len(idx)-1 and _dias(f[idx[j-1]],f[i])<=3 and _dias(f[i],f[idx[j+1]])<=3:
+                a,c=v[idx[j-1]],v[idx[j+1]]
+                dev=x-(a+c)/2
+                # R1: pico de un día que sale y vuelve al mismo nivel
+                if abs(dev)>thr and abs(c-a)<0.3*abs(dev) and (x-a)*(x-c)>0:
+                    s=abs(dev)/thr
+                    if not peor or s>peor[0]: peor=(s,i)
+            # R2: lectura fuera del rango de sus vecinos (±5) por más del umbral
+            m=sorted(w)[len(w)//2] if w else x
+            if len(w)>=6 and abs(x-m)>3*thr:
+                s=abs(x-m)/(3*thr)
+                vec=[v[k] for k in (i-1,i+1) if 0<=k<len(f) and f[k] not in malas and abs(_dias(f[k],f[i]))==1]
+                apoyado=any(abs(x-y)<=thr for y in vec)   # un vecino confirma el valor (crecida real de 2+ días)
+                if (s>2 or not apoyado) and (not peor or s>peor[0]): peor=(s,i)
+        if not peor: break
+        malas[f[peor[1]]]=v[peor[1]]
+    idx=[i for i in range(len(f)) if f[i] not in malas]
+    if len(idx)>1:
+        lim=salto_max if salto_max else max(1.0,15*mad)
+        a,b=v[idx[-2]],v[idx[-1]]
+        if abs(b-a)>lim and _dias(f[idx[-2]],f[idx[-1]])<=3: malas[f[idx[-1]]]=b
+    return {k:x for k,x in serie.items() if k not in malas},malas
+def salto_tipico(serie):
+    """Mayor variación diaria creíble del puerto: percentil 99,9 de los cambios de un día (ya depurados) × 1,5."""
+    f=sorted(serie);ch=sorted(abs(serie[b]-serie[a]) for a,b in zip(f,f[1:]) if _dias(a,b)==1)
+    if len(ch)<50: return None
+    return round(max(1.0,1.5*ch[min(len(ch)-1,int(len(ch)*0.999))]),2)
