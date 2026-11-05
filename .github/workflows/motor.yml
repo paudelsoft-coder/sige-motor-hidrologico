@@ -1,11 +1,9 @@
 name: Motor hidrológico SIGE
 
 on:
-  schedule:
-    - cron: "*/10 10-15 * * *"        # 07:00 a 12:50 (Argentina), cada 10 min: el INA carga las alturas del día
-    - cron: "7 0-9,16-23 * * *"       # resto del día, cada hora: correcciones tardías
-    - cron: "41 13 * * *"             # 10:41 (Argentina): todo (40 días de alturas + represas + pronóstico)
-    - cron: "10 6 * * 1"     # lunes 03:10 (Argentina): recalibración con 3 años
+  # Los horarios los maneja el reloj de Cloudflare (Worker "sige-motor-reloj", cada 10 min), que dispara
+  # este workflow con la tarea que corresponde: rapida / todo (10:40) / calibrar (lunes 03:10).
+  # GitHub no garantiza sus propios horarios programados, por eso no se usan.
   workflow_dispatch:
     inputs:
       tarea:
