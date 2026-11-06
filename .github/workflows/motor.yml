@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tarea:
-        description: "rapida | todo | calibrar | historia | analogos | evaluar | ingesta | represas | pronostico | transito | primera-carga"
+        description: "rapida | todo | calibrar | historia | analogos | evaluar | ingesta | represas | pronostico | transito | primera-carga | glofas | calibrar_glofas | evaluar_prueba"
         default: "todo"
 
 concurrency:
@@ -46,5 +46,5 @@ jobs:
         if: github.event.schedule == '41 13 * * *' || github.event.inputs.tarea == 'todo' || github.event.inputs.tarea == ''
         run: python -m motor todo
       - name: Tarea puntual
-        if: contains(fromJSON('["ingesta","represas","pronostico","transito","historia","analogos","evaluar"]'), github.event.inputs.tarea)
+        if: contains(fromJSON('["ingesta","represas","pronostico","transito","historia","analogos","evaluar","glofas","calibrar_glofas","evaluar_prueba"]'), github.event.inputs.tarea)
         run: python -m motor ${{ github.event.inputs.tarea }}
