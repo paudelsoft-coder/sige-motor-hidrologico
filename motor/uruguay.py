@@ -197,8 +197,20 @@ def _suma(R, z, f, a, b):
     return s
 
 
-def rasgos(D, R, B, f):
-    """Rasgos para pronosticar desde el día f (paso 1)."""
+def _rc(R, f, a, b):
+    """Lluvia de la cuenca (promedio ponderado de las zonas) entre los días f+a y f+b."""
+    s = 0.0
+    for z in ZONAS:
+        v = _suma(R, z, f, a, b)
+        if v is None:
+            return None
+        s += PESO_ZONA[z] * v
+    return s
+
+
+def rasgos(D, R, B, f, mej=True):
+    """Rasgos para pronosticar desde el día f (paso 1). mej=True agrega las mejoras de noviembre 2026: tendencia del
+    último día, suelo mojado (lluvia × cuán alto viene el río y × lluvia de las semanas anteriores) y lluvia fuerte."""
     g = lambda k, d=0: D[k].get(sumar_dias(f, -d))
     req = [g("sg"), g("libres"), g("stome"), g("sob"), g("libres", 2), g("stome", 3), g("sob", 3), g("sg", 3)]
     if any(v is None or v <= 0 for v in req):
@@ -216,41 +228,70 @@ def rasgos(D, R, B, f):
         if not a or not b:
             return None
         x += [a / 1000, (a - b) / 1000]
+    if mej:
+        sg1, li1 = g("sg", 1), g("libres", 1)
+        ante = _rc(R, f, -30, -8)
+        w = [_rc(R, f, a, b) for a, b in ((-3, 0), (-7, -4), (1, 3), (4, 7))]
+        if sg1 is None or li1 is None or ante is None or None in w:
+            return None
+        x += [sg - sg1 / 1000, li - li1 / 1000]
+        for v in w:
+            x += [v * sg / 10, v * ante / 100]
+        x += [w[0] ** 2 / 50, (w[2] + w[3]) ** 2 / 50]
     return x
 
 
-def rasgos2(D, R, B, f):
-    """Rasgos para lo que suelta la represa (paso 2)."""
-    x = rasgos(D, R, B, f)
+def rasgos2(D, R, B, f, mej=True):
+    """Rasgos para lo que suelta la represa (paso 2). Con mejoras: cuánto suele guardar cuando el embalse está bajo."""
+    x = rasgos(D, R, B, f, mej)
     c = D["cota"].get(f, D["cota"].get(sumar_dias(f, -1)))
     de, de3 = D["def"].get(f), D["def"].get(sumar_dias(f, -3))
     if x is None or c is None or de is None or de3 is None:
         return None
-    return x + [c - 34.5, max(0, c - 35), max(0, 33.5 - c), (de - D["sg"][f]) / 1000, de / 1000, (de - de3) / 1000]
+    x = x + [c - 34.5, max(0, c - 35), max(0, 33.5 - c), (de - D["sg"][f]) / 1000, de / 1000, (de - de3) / 1000]
+    if mej:
+        de1, sg3 = D["def"].get(sumar_dias(f, -1)), D["sg"].get(sumar_dias(f, -3))
+        llu = _rc(R, f, -7, 7)
+        if de1 is None or sg3 is None or llu is None:
+            return None
+        bajo = max(0, 34.5 - c)
+        x += [(de - de1) / 1000, bajo * llu / 50, bajo * (D["sg"][f] - sg3) / 1000]
+    return x
 
 
-def ajustar(X, y, lam=LAM):
+def ajustar(X, y, lam=LAM, peso=None):
     X, y = np.asarray(X, float), np.asarray(y, float)
-    mu, sd = X.mean(0), X.std(0)
+    p = np.ones(len(y)) if peso is None else np.asarray(peso, float)
+    mu = (X * p[:, None]).sum(0) / p.sum()
+    sd = np.sqrt(((X - mu) ** 2 * p[:, None]).sum(0) / p.sum())
     sd[sd == 0] = 1
     Z = (X - mu) / sd
-    my = y.mean()
-    w = np.linalg.solve(Z.T @ Z + lam * np.eye(Z.shape[1]), Z.T @ (y - my))
-    return {"mu": mu.tolist(), "sd": sd.tolist(), "w": w.tolist(), "my": float(my)}
+    my = float((y * p).sum() / p.sum())
+    Zp = Z * p[:, None]
+    w = np.linalg.solve(Z.T @ Zp + lam * np.eye(Z.shape[1]), Zp.T @ (y - my))
+    return {"mu": mu.tolist(), "sd": sd.tolist(), "w": w.tolist(), "my": my}
 
 
 def aplicar(m, x):
     return m["my"] + float(np.dot((np.asarray(x) - m["mu"]) / np.asarray(m["sd"]), m["w"]))
 
 
-def calibrar_modelos(D, R, B, hasta):
-    """Modelos por horizonte (cambio de caudal en miles de m³/s) + factor de desvío por puerto."""
+def _peso_crecida(D, R, f):
+    """Los días de crecida o de lluvia fuerte pesan 3 veces más al entrenar (son los que importan para alertas)."""
+    l3 = _rc(R, f, -3, 0) or 0
+    return 3.0 if l3 >= 30 or D["sg"].get(f, 0) >= 10000 else 1.0
+
+
+def calibrar_modelos(D, R, B, hasta, mej=True):
+    """Modelos por horizonte (cambio de caudal en miles de m³/s) + factor de desvío por puerto (y por horizonte con
+    mejoras) + corrección con el error de ayer (con mejoras)."""
     dias = sorted(f for f in D["sg"] if DESDE_CAL <= f < hasta)
-    M = {"entra": {}, "sale": {}}
-    X1c = {f: rasgos(D, R, B, f) for f in dias}
-    X2c = {f: rasgos2(D, R, B, f) for f in dias}
+    M = {"entra": {}, "sale": {}, "mej": mej}
+    X1c = {f: rasgos(D, R, B, f, mej) for f in dias}
+    X2c = {f: rasgos2(D, R, B, f, mej) for f in dias}
+    pc = {f: (_peso_crecida(D, R, f) if mej else 1.0) for f in dias}
     for k in HORIZONTES:
-        X1, y1, X2, y2 = [], [], [], []
+        X1, y1, p1, X2, y2, p2 = [], [], [], [], [], []
         for f in dias:
             t = sumar_dias(f, k)
             if t >= hasta:
@@ -259,29 +300,60 @@ def calibrar_modelos(D, R, B, hasta):
             if x is not None and D["sg"].get(t):
                 X1.append(x)
                 y1.append((D["sg"][t] - D["sg"][f]) / 1000)
+                p1.append(pc[f])
             x2 = X2c[f]
             if x2 is not None and D["def"].get(t):
                 X2.append(x2)
                 y2.append((D["def"][t] - D["def"][f]) / 1000)
-        M["entra"][k] = ajustar(X1, y1)
-        M["sale"][k] = ajustar(X2, y2)
-    # Factor alfa: cuánto del desvío de hoy respecto de la curva se mantiene (0 = el puerto vuelve a la curva)
+                p2.append(pc[f])
+        M["entra"][k] = ajustar(X1, y1, peso=p1)
+        M["sale"][k] = ajustar(X2, y2, peso=p2)
+    # Factor alfa: cuánto del desvío de hoy respecto de la curva se mantiene (0 = el puerto vuelve a la curva).
+    # Con mejoras se calcula para cada horizonte: al día siguiente el puerto todavía se parece mucho a hoy.
     M["alfa"] = {}
+    grilla = [i / 10 for i in range(11)] if mej else [0, .25, .5, .75, 1]
     for p in PUERTOS:
-        mejor = (1e9, 0.5)
-        for a in (0, .25, .5, .75, 1):
-            e, n = 0.0, 0
-            for f in dias[::3]:
-                h0, o0 = D[p].get(f), D["def"].get(f)
-                t = sumar_dias(f, 5)
-                h1, o1 = D[p].get(t), D["def"].get(sumar_dias(t, -DEMORA[p]))
-                if None in (h0, o0, h1, o1) or t >= hasta:
-                    continue
-                e += (curva(p, o1) + a * (h0 - curva(p, o0)) - h1) ** 2
-                n += 1
-            if n and e / n < mejor[0]:
-                mejor = (e / n, a)
-        M["alfa"][p] = mejor[1]
+        M["alfa"][p] = {}
+        for k in (HORIZONTES if mej else [5]):
+            mejor = (1e9, 0.5)
+            for a in grilla:
+                e, n = 0.0, 0
+                for f in dias[::2]:
+                    h0, o0 = D[p].get(f), D["def"].get(f)
+                    t = sumar_dias(f, k)
+                    h1, o1 = D[p].get(t), D["def"].get(sumar_dias(t, -DEMORA[p]))
+                    if None in (h0, o0, h1, o1) or t >= hasta:
+                        continue
+                    e += (curva(p, o1) + a * (h0 - curva(p, o0)) - h1) ** 2
+                    n += 1
+                if n and e / n < mejor[0]:
+                    mejor = (e / n, a)
+            M["alfa"][p][k] = mejor[1]
+        if not mej:
+            M["alfa"][p] = {k: M["alfa"][p][5] for k in HORIZONTES}
+    # Corrección con el error de ayer: si ayer el pronóstico a 1 día se pasó (o se quedó corto), los de hoy tienden a
+    # equivocarse para el mismo lado. gamma[var][k] = cuánto de ese error se descuenta.
+    M["gamma"] = {}
+    if mej:
+        crudo = {f: _pronostico_crudo(M, D, R, B, f) for f in dias}
+        reales = lambda t: {"q_entra": D["sg"].get(t), "q_sale": D["def"].get(t), **{p: D[p].get(t) for p in PUERTOS}}
+        for var in ["q_entra", "q_sale", *PUERTOS]:
+            M["gamma"][var] = {}
+            for k in HORIZONTES:
+                num = den = 0.0
+                for f in dias:
+                    ay = crudo.get(sumar_dias(f, -1))
+                    P = crudo.get(f)
+                    t = sumar_dias(f, k)
+                    if not ay or not P or t >= hasta:
+                        continue
+                    r0, rk = reales(f)[var], reales(t)[var]
+                    if r0 is None or rk is None or ay[1][var] is None or P[k][var] is None:
+                        continue
+                    e1, ek = ay[1][var] - r0, P[k][var] - rk
+                    num += e1 * ek
+                    den += e1 * e1
+                M["gamma"][var][k] = round(float(min(1.0, max(0.0, num / den))), 3) if den else 0.0
     return M
 
 
@@ -289,12 +361,16 @@ def normalizar(M):
     """Las claves de horizonte vuelven como texto al leer el modelo desde la base."""
     for c in ("entra", "sale"):
         M[c] = {int(k): v for k, v in M[c].items()}
+    M["alfa"] = {p: ({int(k): v for k, v in a.items()} if isinstance(a, dict) else {k: a for k in HORIZONTES})
+                 for p, a in M["alfa"].items()}
+    M["gamma"] = {v: {int(k): g for k, g in d.items()} for v, d in M.get("gamma", {}).items()}
+    M.setdefault("mej", False)
     return M
 
 
-def pronosticar(M, D, R, B, f):
-    """Pronóstico desde el día f: {k: {fecha, q_entra, q_sale, alturas}} o None si faltan datos."""
-    x, x2 = rasgos(D, R, B, f), rasgos2(D, R, B, f)
+def _pronostico_crudo(M, D, R, B, f):
+    mej = M.get("mej", False)
+    x, x2 = rasgos(D, R, B, f, mej), rasgos2(D, R, B, f, mej)
     if x is None or x2 is None:
         return None
     sg0, de0 = D["sg"][f], D["def"][f]
@@ -318,28 +394,41 @@ def pronosticar(M, D, R, B, f):
             if h0 is None:
                 alt[p] = None
                 continue
-            a = M["alfa"][p]
-            alt[p] = round(curva(p, sale_en(k - DEMORA[p])) + a * (h0 - curva(p, de0)), 2)
-        out[k] = {"fecha": sumar_dias(f, k), "q_entra": round(Q[k][0]), "q_sale": round(Q[k][1]), **alt}
+            a = M["alfa"][p][k]
+            alt[p] = curva(p, sale_en(k - DEMORA[p])) + a * (h0 - curva(p, de0))
+        out[k] = {"fecha": sumar_dias(f, k), "q_entra": Q[k][0], "q_sale": Q[k][1], **alt}
     return out
+
+
+def pronosticar(M, D, R, B, f):
+    """Pronóstico desde el día f: {k: {fecha, q_entra, q_sale, alturas}} o None si faltan datos."""
+    P = _pronostico_crudo(M, D, R, B, f)
+    if P is None:
+        return None
+    if M.get("gamma"):
+        ay = _pronostico_crudo(M, D, R, B, sumar_dias(f, -1))
+        real = {"q_entra": D["sg"].get(f), "q_sale": D["def"].get(f), **{p: D[p].get(f) for p in PUERTOS}}
+        if ay:
+            for var, g in M["gamma"].items():
+                if real[var] is None or ay[1][var] is None:
+                    continue
+                e1 = ay[1][var] - real[var]
+                for k in HORIZONTES:
+                    if P[k][var] is not None:
+                        P[k][var] -= g[k] * e1
+    for k in HORIZONTES:
+        P[k]["q_entra"] = round(max(200.0, P[k]["q_entra"]))
+        P[k]["q_sale"] = round(max(200.0, P[k]["q_sale"]))
+        for p in PUERTOS:
+            if P[k][p] is not None:
+                P[k][p] = round(float(P[k][p]), 2)
+    return P
 
 
 # ------------------------------------------------------------------------------------------------ prueba
 
-def evaluar(D, R, B, corte="2021-01-01", log=print):
-    """Calibra con datos hasta `corte` y pronostica cada día posterior. Reporta el error en todos los días y en los días
-    posteriores a una lluvia intensa (≥ 45 mm de promedio en la cuenca en 3 días). Usa la lluvia que realmente cayó como
-    si fuera el pronóstico: en la operación real el error va a ser algo mayor."""
-    M = calibrar_modelos(D, R, B, corte)
-    Rc = {}
-    for f in R["alto"]:
-        v = [R[z].get(f) for z in ZONAS]
-        if None not in v:
-            Rc[f] = sum(PESO_ZONA[z] * R[z][f] for z in ZONAS)
-    lluvia3 = lambda f: sum(Rc.get(sumar_dias(f, -d), 0) for d in range(3))
-    eventos = [f for f in sorted(Rc) if f >= corte and lluvia3(f) >= 45]
-    ev = set(eventos)
-    PP = {f: pronosticar(M, D, R, B, f) for f in sorted(D["sg"]) if f >= corte}
+def _medir(PP, D, ev, corte):
+    rm = lambda v: (sum(z * z for z in v) / len(v)) ** 0.5 if v else float("nan")
     res = {}
     for k in HORIZONTES:
         e = {p: [] for p in ["entra", "sale", *PUERTOS]}
@@ -360,23 +449,51 @@ def evaluar(D, R, B, corte="2021-01-01", log=print):
                 if evento:
                     ee[p].append(pr - real[p])
                     pe[p].append(hoy[p] - real[p])
-        rm = lambda v: (sum(z * z for z in v) / len(v)) ** 0.5 if v else float("nan")
         res[k] = {p: {"todo": rm(e[p]), "lluvia": rm(ee[p]), "sin_modelo": rm(pe[p]), "n": len(ee[p])} for p in e}
-        log(f"uruguay a {k:2d} días: " + " · ".join(
-            f"{p} {res[k][p]['lluvia']:.0f} (sin modelo {res[k][p]['sin_modelo']:.0f})" if p in ("entra", "sale") else
-            f"{p} {res[k][p]['lluvia']:.2f} m (sin modelo {res[k][p]['sin_modelo']:.2f})" for p in e)
-            + f" · días tras lluvia intensa: {res[k]['entra']['n']}")
-    # detalle de los eventos de lluvia intensa: pronóstico a 7 días vs lo que marcó Concordia
+    return res
+
+
+def evaluar(D, R, B, corte="2021-01-01", log=print):
+    """Calibra con datos hasta `corte` y pronostica cada día posterior, con el modelo anterior y con las mejoras, sobre los
+    mismos días. Reporta el error en los días posteriores a una lluvia intensa (≥ 45 mm en 3 días en la cuenca) y en todos
+    los días. Usa la lluvia que realmente cayó como si fuera el pronóstico: en la operación real el error será algo mayor."""
+    Rc = {}
+    for f in R["alto"]:
+        v = [R[z].get(f) for z in ZONAS]
+        if None not in v:
+            Rc[f] = sum(PESO_ZONA[z] * R[z][f] for z in ZONAS)
+    lluvia3 = lambda f: sum(Rc.get(sumar_dias(f, -d), 0) for d in range(3))
+    eventos = [f for f in sorted(Rc) if f >= corte and lluvia3(f) >= 45]
+    ev = set(eventos)
+    dias = [f for f in sorted(D["sg"]) if f >= corte]
+    M0 = calibrar_modelos(D, R, B, corte, mej=False)
+    M1 = calibrar_modelos(D, R, B, corte, mej=True)
+    P0 = {f: pronosticar(M0, D, R, B, f) for f in dias}
+    P1 = {f: pronosticar(M1, D, R, B, f) for f in dias}
+    comunes = [f for f in dias if P0[f] and P1[f]]   # mismos días para comparar en forma justa
+    P0 = {f: P0[f] for f in comunes}
+    P1 = {f: P1[f] for f in comunes}
+    r0, r1 = _medir(P0, D, ev, corte), _medir(P1, D, ev, corte)
+    log(f"uruguay: alfa por horizonte {M1['alfa']}")
+    log(f"uruguay: corrección con error de ayer {M1['gamma']}")
+    for clave, titulo in (("lluvia", "TRAS LLUVIA INTENSA"), ("todo", "TODOS LOS DÍAS")):
+        log(f"uruguay {titulo} — antes → con mejoras (sin modelo):")
+        for k in HORIZONTES:
+            log(f"  a {k:2d} días: " + " · ".join(
+                (f"{p} {r0[k][p][clave]:.0f}→{r1[k][p][clave]:.0f}" if p in ("entra", "sale") else
+                 f"{p} {r0[k][p][clave]:.2f}→{r1[k][p][clave]:.2f} m") +
+                (f" ({r1[k][p]['sin_modelo']:.2f})" if clave == "lluvia" and p not in ("entra", "sale") else "")
+                for p in r1[k]) + (f" · n {r1[k]['entra']['n']}" if clave == "lluvia" else ""))
     vistos = set()
     for f in eventos:
-        P = PP.get(f)
-        if not P or any(_dias(v, f) < 10 for v in vistos):
+        if f not in P1 or any(_dias(v, f) < 10 for v in vistos):
             continue
         vistos.add(f)
-        t = P[7]["fecha"]
+        t = P1[f][7]["fecha"]
         hc, h0 = D["conc"].get(t), D["conc"].get(f)
-        if hc is None or h0 is None or P[7]["conc"] is None:
+        if hc is None or h0 is None or P1[f][7]["conc"] is None:
             continue
-        log(f"  evento {f} · llovió {lluvia3(f):.0f} mm · Concordia {h0:.2f} → real {hc:.2f} / pronóstico {P[7]['conc']:.2f}"
-            f" (error {P[7]['conc'] - hc:+.2f} m) · Salto Grande soltó {D['def'].get(t, 0):.0f} / pronóstico {P[7]['q_sale']}")
-    return M, res
+        log(f"  evento {f} · {lluvia3(f):.0f} mm · Concordia {h0:.2f} → real {hc:.2f} · antes {P0[f][7]['conc']:.2f}"
+            f" · ahora {P1[f][7]['conc']:.2f} (error {P1[f][7]['conc'] - hc:+.2f} m) · SG soltó {D['def'].get(t, 0):.0f}"
+            f" / ahora {P1[f][7]['q_sale']}")
+    return M1, r1
