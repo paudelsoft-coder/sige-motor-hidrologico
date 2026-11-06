@@ -442,7 +442,9 @@ def calibrar_uruguay():
     D, B = _datos_uruguay("2011-01-01")
     R = _lluvia_historica("2011-01-01")
     M = U.calibrar_modelos(D, R, B, dt.date.today().isoformat())
-    supa.upsert("sige_hidro_modelo_uruguay", [{"id": "modelo", "datos": M, "calibrado": dt.date.today().isoformat()}], "id")
+    M0 = U.calibrar_modelos(D, R, B, dt.date.today().isoformat(), mej=U.MEJORAS_SIN_ANA)
+    supa.upsert("sige_hidro_modelo_uruguay", [{"id": "modelo", "datos": M, "calibrado": dt.date.today().isoformat()},
+                                              {"id": "modelo_sin_ana", "datos": M0, "calibrado": dt.date.today().isoformat()}], "id")
     print(f"calibrar_uruguay: modelos para {U.HORIZONTES} días · alfa {M['alfa']}")
 
 
@@ -457,11 +459,11 @@ def evaluar_uruguay():
 def uruguay():
     """Pronóstico diario de prueba (no lo muestra el portal): guarda en sige_hidro_pron_uruguay."""
     from . import supa, uruguay as U
-    filas = supa.select("sige_hidro_modelo_uruguay", {"select": "datos", "id": "eq.modelo"})
-    if not filas:
+    filas = {r["id"]: r for r in supa.select("sige_hidro_modelo_uruguay", {"select": "id,datos"})}
+    if "modelo" not in filas:
         print("uruguay: falta el modelo (python -m motor calibrar_uruguay)")
         return
-    M = U.normalizar(filas[0]["datos"])
+    modelos = [U.normalizar(filas[i]["datos"]) for i in ("modelo", "modelo_sin_ana") if i in filas]
     hoy = dt.date.today()
     D, B = _datos_uruguay((hoy - dt.timedelta(days=90)).isoformat(), telemetria_dias=8)
     R = _lluvia_supa((hoy - dt.timedelta(days=90)).isoformat())
@@ -471,10 +473,15 @@ def uruguay():
     for z, d in rec.items():   # ERA5 donde existe; los últimos días y el futuro, del modelo meteorológico
         for f, v in d.items():
             R.setdefault(z, {}).setdefault(f, v)
-    for atras in range(0, 8):
-        f = (hoy - dt.timedelta(days=atras)).isoformat()
-        P = U.pronosticar(M, D, R, B, f)
+    P = None
+    for M in modelos:   # primero con escalas de Brasil; si no respondieron, el modelo de respaldo
+        for atras in range(0, 8):
+            f = (hoy - dt.timedelta(days=atras)).isoformat()
+            P = U.pronosticar(M, D, R, B, f)
+            if P:
+                break
         if P:
+            print(f"uruguay: modelo {'con' if M.get('mej', {}).get('ana') else 'sin'} escalas de Brasil")
             break
     if not P:
         print("uruguay: faltan datos para pronosticar")
