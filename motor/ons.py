@@ -1,4 +1,4 @@
-"""Caudales diarios de represas brasileñas (Itaipú y cuenca del Iguazú) desde los datos abiertos del ONS.
+"""Caudales diarios de represas brasileñas (Itaipú, cuenca del Iguazú y Alto Uruguay) desde los datos abiertos del ONS.
 
 Fuente: ONS, "Dados Hidrológicos por Reservatório – Base diária" (dados.ons.org.br, dataset dados-hidrologicos-res).
 Un CSV por año, separado por ';', con columnas din_instante, val_vazaoafluente, val_vazaoturbinada,
@@ -12,7 +12,10 @@ import urllib.request
 URL = "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/dados_hidrologicos_di/DADOS_HIDROLOGICOS_RES_{anio}.csv"
 UA = "SIGE-MotorHidrologico/1.0 (defensa civil; uso no comercial)"
 # nombre en el ONS -> clave en sige_hidro_represas
-REPRESAS = {"ITAIPU": "ITAIPU", "BAIXO IGUACU": "BAIXO_IGUACU", "SALTO CAXIAS": "SALTO_CAXIAS", "PORTO PRIMAVERA": "PORTO_PRIMAVERA"}
+REPRESAS = {"ITAIPU": "ITAIPU", "BAIXO IGUACU": "BAIXO_IGUACU", "SALTO CAXIAS": "SALTO_CAXIAS", "PORTO PRIMAVERA": "PORTO_PRIMAVERA",
+            # Alto Uruguay (Brasil): avisan con 6 a 9 días lo que va a llegar a Salto Grande
+            "FOZ CHAPECO": "FOZ_CHAPECO", "ITÁ": "ITA", "ITA": "ITA", "PASSO SAO JOAO": "PASSO_SAO_JOAO", "SAO JOSE": "SAO_JOSE",
+            "MONJOLINHO": "MONJOLINHO"}
 
 
 def _num(v):
