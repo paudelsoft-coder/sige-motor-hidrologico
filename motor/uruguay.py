@@ -204,7 +204,8 @@ VARIANTES = {   # combinaciones de mejoras que compara evaluar()
     "+escalas_brasil_suave": {"alfa": 1, "gamma": 1, "lam": 80, "ana": 1},
 }
 ANA = ["a_irai", "a_ijui", "a_ibicui", "a_alegrete", "a_sborja"]   # escalas de Brasil (ver ana.py)
-MEJORAS = {"alfa": 1, "gamma": 1, "lam": 30}   # lo que usa el pronóstico diario: ganó "base_suave" en evaluar_uruguay (nov 2026)
+MEJORAS = {"alfa": 1, "gamma": 1, "lam": 80, "ana": 1}   # pronóstico diario: ganó "+escalas_brasil_suave" (evaluar_uruguay, nov 2026)
+MEJORAS_SIN_ANA = {"alfa": 1, "gamma": 1, "lam": 30}   # respaldo si las escalas de Brasil no responden
 
 
 def _fl(mej):
