@@ -11,6 +11,9 @@ Uso:
   python -m motor historia              baja la serie histórica completa del INA (desde 1900) → sige_hidro_historia
   python -m motor analogos              situaciones parecidas en la historia para cada puerto → sige_hidro_analogos
   python -m motor evaluar               mide si GloFAS (caudal simulado, Open-Meteo) mejora el pronóstico (no guarda nada)
+  python -m motor calibrar_glofas       modelo de prueba con GloFAS → sige_hidro_modelo_glofas (también corre con calibrar)
+  python -m motor glofas                baja GloFAS y guarda el pronóstico de prueba del día (también corre con todo)
+  python -m motor evaluar_prueba        compara el pronóstico de prueba con lo que realmente pasó
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
@@ -281,6 +284,85 @@ def calibrar():
     print("calibrar:", len(modelo), "puertos con modelo")
 
 
+# ---------------------------------------------------------------- GloFAS en modo prueba (el portal no lo usa)
+
+def _glofas_supa(desde):
+    from . import supa
+    G = {}
+    for r in supa.select("sige_hidro_glofas", {"select": "punto_id,fecha,caudal_milm3s", "fecha": f"gte.{desde}"}):
+        G.setdefault(r["punto_id"], {})[r["fecha"]] = float(r["caudal_milm3s"])
+    return G
+
+
+def calibrar_glofas():
+    """Igual que calibrar(), pero con el caudal GloFAS como entrada posible → sige_hidro_modelo_glofas."""
+    from . import externas, supa
+    from .calibrar import calibrar as cal, SUBE_7D, ITAIPU_ID
+    hoy = dt.date.today()
+    S = _series_supa(365 * 3 + 10)
+    S.update(externas.caudales((hoy - dt.timedelta(days=365 * 3 + 40)).isoformat(), hoy.isoformat()))
+    modelo = cal(estaciones(), S, hoy, anios=3, log=lambda *a: None,
+                 extras={ITAIPU_ID: "Itaipú (descarga)", **externas.extras()})
+    supa.upsert("sige_hidro_modelo_glofas", [{"estacion_id": int(k), "calibrado": hoy.isoformat(), "sube_7d": SUBE_7D, **v}
+                                             for k, v in modelo.items()], "estacion_id")
+    usan = [k for k, m in modelo.items() if any(x["id"] >= 1100 for x in m["entradas"])]
+    print(f"calibrar_glofas: {len(modelo)} puertos con modelo, {len(usan)} usan GloFAS")
+
+
+def glofas_prueba():
+    """Baja GloFAS (45 días atrás + 30 de pronóstico) y guarda el pronóstico de prueba del día junto al normal."""
+    from . import externas, supa
+    hoy = dt.date.today()
+    G = externas.caudales((hoy - dt.timedelta(days=45)).isoformat(), (hoy + dt.timedelta(days=29)).isoformat())
+    supa.upsert("sige_hidro_glofas", [{"punto_id": k, "fecha": f, "caudal_milm3s": v, "descargado": hoy.isoformat()}
+                                      for k, s in G.items() for f, v in s.items()], "punto_id,fecha")
+    mg = {str(r["estacion_id"]): r for r in supa.select("sige_hidro_modelo_glofas", {"select": "*"})}
+    if not mg:
+        print("glofas: caudales guardados; falta el modelo de prueba (python -m motor calibrar_glofas)")
+        return
+    mb = {str(r["estacion_id"]): r for r in supa.select("sige_hidro_modelo", {"select": "*"})}
+    S = _series_supa(40)
+    S.update(G)
+    filas = []
+    for e in estaciones():
+        pg = nucleo.proyectar(S, mg, e["id"])
+        if not pg:
+            continue
+        base = {q["k"]: q["central"] for q in (nucleo.proyectar(S, mb, e["id"]) or [])}
+        filas += [{"estacion_id": e["id"], "emitido": hoy.isoformat(), "dato_fecha": max(S[e["id"]]), "k": q["k"],
+                   "fecha": q["fecha"], "central": q["central"], "base_central": base.get(q["k"])} for q in pg]
+    supa.upsert("sige_hidro_pron_prueba", filas, "estacion_id,emitido,k")
+    print(f"glofas: {sum(len(v) for v in G.values())} caudales, pronóstico de prueba para {len(filas) // 15} puertos")
+
+
+def evaluar_prueba():
+    """Compara el pronóstico de prueba (con GloFAS) y el normal contra la altura que realmente se midió."""
+    from . import supa
+    P = supa.select("sige_hidro_pron_prueba", {"select": "estacion_id,emitido,dato_fecha,k,fecha,central,base_central"})
+    S = _series_supa(120)
+    acc = {}
+    for r in P:
+        obs = S.get(r["estacion_id"], {}).get(r["fecha"])
+        if r["k"] not in (3, 7) or obs is None or r["central"] is None or r["base_central"] is None:
+            continue
+        a = acc.setdefault(r["estacion_id"], {3: ([], []), 7: ([], [])})[r["k"]]
+        a[0].append(float(r["base_central"]) - obs)
+        a[1].append(float(r["central"]) - obs)
+    rm = lambda v: (sum(z * z for z in v) / len(v)) ** 0.5 if v else float("nan")
+    emis = sorted({r["emitido"] for r in P})
+    print(f"evaluar_prueba: {len(emis)} días emitidos ({emis[0] if emis else '-'} a {emis[-1] if emis else '-'})")
+    print(f"{'puerto':26s}  n·7d  normal·3d  GloFAS·3d  normal·7d  GloFAS·7d")
+    tot = [[], []]
+    for e in estaciones():
+        a = acc.get(e["id"])
+        if not a or not a[7][0]:
+            continue
+        tot[0] += a[7][0]; tot[1] += a[7][1]
+        print(f"{e['nombre'][:26]:26s} {len(a[7][0]):5d} {rm(a[3][0]):10.2f} {rm(a[3][1]):10.2f} {rm(a[7][0]):10.2f} {rm(a[7][1]):10.2f}")
+    if tot[0]:
+        print(f"todos los puertos, error a 7 días: normal {rm(tot[0]):.3f} m · con GloFAS {rm(tot[1]):.3f} m")
+
+
 COLUMNAS_CRUCE = ("nivel", "tipo", "umbral", "momento", "desde_rango", "hasta_rango", "sale", "en_nivel_desde",
                   "desde_antes_de_serie", "permanencia_h", "permanencia_minima")
 
@@ -373,6 +455,16 @@ if __name__ == "__main__":
         ingesta(int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--dias" else 40)
     elif tarea == "calibrar":
         calibrar()
+        try:
+            calibrar_glofas()
+        except Exception as ex:   # el modelo de prueba nunca frena al normal
+            print("calibrar_glofas: no se pudo:", ex)
+    elif tarea == "calibrar_glofas":
+        calibrar_glofas()
+    elif tarea == "glofas":
+        glofas_prueba()
+    elif tarea == "evaluar_prueba":
+        evaluar_prueba()
     elif tarea == "pronostico":
         pronostico()
     elif tarea == "transito":
@@ -402,3 +494,7 @@ if __name__ == "__main__":
             analogos()
         except Exception as ex:   # si todavía no se cargó la historia, el resto sigue igual
             print("analogos: sin actualizar:", ex)
+        try:
+            glofas_prueba()
+        except Exception as ex:   # modo prueba: si falla, no afecta al pronóstico del portal
+            print("glofas: sin actualizar:", ex)
