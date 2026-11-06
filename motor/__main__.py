@@ -14,6 +14,9 @@ Uso:
   python -m motor calibrar_glofas       modelo de prueba con GloFAS → sige_hidro_modelo_glofas (también corre con calibrar)
   python -m motor glofas                baja GloFAS y guarda el pronóstico de prueba del día (también corre con todo)
   python -m motor evaluar_prueba        compara el pronóstico de prueba con lo que realmente pasó
+  python -m motor calibrar_uruguay      modelo del río Uruguay (Salto Grande → Concordia) → sige_hidro_modelo_uruguay
+  python -m motor evaluar_uruguay       prueba del modelo del Uruguay con todos los datos desde 2021 (no guarda nada)
+  python -m motor uruguay               pronóstico de prueba del río Uruguay → sige_hidro_pron_uruguay (también corre con todo)
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
@@ -390,6 +393,95 @@ def evaluar_prueba():
         print(f"todos los puertos, error a 7 días: normal {rm(tot[0]):.3f} m · con GloFAS {rm(tot[1]):.3f} m")
 
 
+# ---------------------------------------------------------------- río Uruguay (Salto Grande → Concordia), modo prueba
+
+def _lluvia_supa(desde):
+    from . import supa
+    R = {}
+    for r in supa.select("sige_hidro_lluvia", {"select": "zona,fecha,mm", "tipo": "eq.era5", "fecha": f"gte.{desde}"}):
+        R.setdefault(r["zona"], {})[r["fecha"]] = float(r["mm"])
+    return R
+
+
+def _lluvia_historica(desde):
+    """Lluvia ERA5 guardada; si falta un tramo, la baja de Open-Meteo y la guarda (la primera vez tarda ~10 min)."""
+    from . import supa, uruguay as U
+    R = _lluvia_supa(desde)
+    ultima = min((max(R[z]) for z in U.ZONAS if R.get(z)), default=None)
+    hasta = (dt.date.today() - dt.timedelta(days=6)).isoformat()
+    if ultima is None or ultima < hasta:
+        nuevo = U.lluvia_historica(desde if ultima is None else U.sumar_dias(ultima, 1), hasta)
+        supa.upsert("sige_hidro_lluvia", [{"zona": z, "fecha": f, "mm": round(v, 2), "tipo": "era5", "actualizado": dt.date.today().isoformat()}
+                                          for z, d in nuevo.items() for f, v in d.items()], "zona,fecha,tipo")
+        for z, d in nuevo.items():
+            R.setdefault(z, {}).update(d)
+        print(f"uruguay: lluvia ERA5 agregada {sum(len(d) for d in nuevo.values())} datos")
+    return R
+
+
+def _datos_uruguay(desde):
+    from . import uruguay as U
+    D, informe = U.series_ina(desde)
+    print("uruguay: limpieza " + ", ".join(f"{k} -{v['imposibles'] + v['picos'] + v['congelados']}" for k, v in informe.items()))
+    B = U.represas_br(desde)
+    if not B.get("FOZ_CHAPECO"):
+        print("uruguay: faltan las represas de Brasil, las bajo del ONS")
+        represas(2010)
+        B = U.represas_br(desde)
+    return D, B
+
+
+def calibrar_uruguay():
+    from . import supa, uruguay as U
+    D, B = _datos_uruguay("2011-01-01")
+    R = _lluvia_historica("2011-01-01")
+    M = U.calibrar_modelos(D, R, B, dt.date.today().isoformat())
+    supa.upsert("sige_hidro_modelo_uruguay", [{"id": "modelo", "datos": M, "calibrado": dt.date.today().isoformat()}], "id")
+    print(f"calibrar_uruguay: modelos para {U.HORIZONTES} días · alfa {M['alfa']}")
+
+
+def evaluar_uruguay():
+    """Prueba con todos los datos: calibra hasta 2020 y pronostica cada día de 2021 a hoy."""
+    from . import uruguay as U
+    D, B = _datos_uruguay("2011-01-01")
+    R = _lluvia_historica("2011-01-01")
+    U.evaluar(D, R, B)
+
+
+def uruguay():
+    """Pronóstico diario de prueba (no lo muestra el portal): guarda en sige_hidro_pron_uruguay."""
+    from . import supa, uruguay as U
+    filas = supa.select("sige_hidro_modelo_uruguay", {"select": "datos", "id": "eq.modelo"})
+    if not filas:
+        print("uruguay: falta el modelo (python -m motor calibrar_uruguay)")
+        return
+    M = U.normalizar(filas[0]["datos"])
+    hoy = dt.date.today()
+    D, B = _datos_uruguay((hoy - dt.timedelta(days=90)).isoformat())
+    R = _lluvia_supa((hoy - dt.timedelta(days=90)).isoformat())
+    rec = U.lluvia_reciente()
+    supa.upsert("sige_hidro_lluvia", [{"zona": z, "fecha": f, "mm": round(v, 2), "tipo": "pronostico", "actualizado": hoy.isoformat()}
+                                      for z, d in rec.items() for f, v in d.items()], "zona,fecha,tipo")
+    for z, d in rec.items():   # ERA5 donde existe; los últimos días y el futuro, del modelo meteorológico
+        for f, v in d.items():
+            R.setdefault(z, {}).setdefault(f, v)
+    for atras in range(0, 8):
+        f = (hoy - dt.timedelta(days=atras)).isoformat()
+        P = U.pronosticar(M, D, R, B, f)
+        if P:
+            break
+    if not P:
+        print("uruguay: faltan datos para pronosticar")
+        return
+    lluvia7 = sum(U.PESO_ZONA[z] * U._suma(R, z, f, 1, 7) for z in U.ZONAS)
+    supa.upsert("sige_hidro_pron_uruguay", [{"emitido": hoy.isoformat(), "k": k, "dato_fecha": f, "fecha": v["fecha"],
+                                             "q_entra": v["q_entra"], "q_sale": v["q_sale"], "h_concordia": v["conc"],
+                                             "h_colon": v["colon"], "h_cdu": v["cdu"], "lluvia_fut_mm": round(lluvia7, 1)}
+                                            for k, v in P.items()], "emitido,k")
+    print(f"uruguay: desde {f} · lluvia pronosticada 7 días {lluvia7:.0f} mm · " + " · ".join(
+        f"+{k}d entra {v['q_entra']} sale {v['q_sale']} Concordia {v['conc']}" for k, v in P.items() if k in (3, 7)))
+
+
 COLUMNAS_CRUCE = ("nivel", "tipo", "umbral", "momento", "desde_rango", "hasta_rango", "sale", "en_nivel_desde",
                   "desde_antes_de_serie", "permanencia_h", "permanencia_minima")
 
@@ -486,8 +578,18 @@ if __name__ == "__main__":
             calibrar_glofas()
         except Exception as ex:   # el modelo de prueba nunca frena al normal
             print("calibrar_glofas: no se pudo:", ex)
+        try:
+            calibrar_uruguay()
+        except Exception as ex:
+            print("calibrar_uruguay: no se pudo:", ex)
     elif tarea == "calibrar_glofas":
         calibrar_glofas()
+    elif tarea == "calibrar_uruguay":
+        calibrar_uruguay()
+    elif tarea == "evaluar_uruguay":
+        evaluar_uruguay()
+    elif tarea == "uruguay":
+        uruguay()
     elif tarea == "glofas":
         glofas_prueba()
     elif tarea == "evaluar_prueba":
@@ -525,3 +627,7 @@ if __name__ == "__main__":
             glofas_prueba()
         except Exception as ex:   # modo prueba: si falla, no afecta al pronóstico del portal
             print("glofas: sin actualizar:", ex)
+        try:
+            uruguay()
+        except Exception as ex:
+            print("uruguay: sin actualizar:", ex)
