@@ -199,12 +199,11 @@ def _suma(R, z, f, a, b):
 
 VARIANTES = {   # combinaciones de mejoras que compara evaluar()
     "base": {},
-    "alfa+error_ayer": {"alfa": 1, "gamma": 1},
-    "+peso_crecidas": {"alfa": 1, "gamma": 1, "peso": 1},
-    "+suelo_mojado": {"alfa": 1, "gamma": 1, "rasgos": 1},
-    "+suelo_mojado_suave": {"alfa": 1, "gamma": 1, "rasgos": 1, "lam": 60},
     "base_suave": {"alfa": 1, "gamma": 1, "lam": 30},
+    "+escalas_brasil": {"alfa": 1, "gamma": 1, "lam": 30, "ana": 1},
+    "+escalas_brasil_suave": {"alfa": 1, "gamma": 1, "lam": 80, "ana": 1},
 }
+ANA = ["a_irai", "a_ijui", "a_ibicui", "a_alegrete", "a_sborja"]   # escalas de Brasil (ver ana.py)
 MEJORAS = {"alfa": 1, "gamma": 1, "lam": 30}   # lo que usa el pronóstico diario: ganó "base_suave" en evaluar_uruguay (nov 2026)
 
 
@@ -245,6 +244,15 @@ def rasgos(D, R, B, f, mej=None):
         if not a or not b:
             return None
         x += [a / 1000, (a - b) / 1000]
+    if _fl(mej).get("ana"):
+        for s in ANA:
+            serie = D.get(s, {})
+            v0 = serie.get(f) or serie.get(sumar_dias(f, -1))
+            v2 = serie.get(sumar_dias(f, -2)) or serie.get(sumar_dias(f, -3))
+            if not v0 or not v2:
+                return None
+            x += [v0 / 1000, (v0 - v2) / 1000]
+        x.append((D["a_irai"].get(f) or D["a_irai"][sumar_dias(f, -1)]) / 1000 - so)
     if _fl(mej).get("rasgos"):
         sg1, li1 = g("sg", 1), g("libres", 1)
         ante = _rc(R, f, -30, -8)
