@@ -264,7 +264,8 @@ def analogos():
             continue
         limpia, _ = nucleo.depurar(s)
         limpia, _ = nucleo.depurar(s, nucleo.salto_tipico(limpia))
-        r = nucleo.analogos(limpia, e["alerta"], e["evac"])
+        sin = float("inf")   # puertos sin niveles oficiales: solo la parte de alturas, sin cruces de nivel
+        r = nucleo.analogos(limpia, e["alerta"] if e["alerta"] is not None else sin, e["evac"] if e["evac"] is not None else sin)
         if not r:
             continue
         sit, res, casos = r
@@ -375,7 +376,7 @@ def _calcular(S, modelo, sube_7d):
         if not proy:
             continue
         pron += [{"estacion_id": e["id"], "emitido": emitido, "dato_fecha": max(S[e["id"]]), **q} for q in proy]
-        for ev in nucleo.cruces(S[e["id"]], proy, e["alerta"], e["evac"]):
+        for ev in (nucleo.cruces(S[e["id"]], proy, e["alerta"], e["evac"]) if e["alerta"] is not None and e["evac"] is not None else []):
             # PostgREST exige las mismas columnas en todas las filas de un lote
             fila = {"estacion_id": e["id"], "emitido": emitido, **{k: None for k in COLUMNAS_CRUCE}}
             fila.update({k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in ev.items()})
