@@ -205,7 +205,7 @@ VARIANTES = {   # combinaciones de mejoras que compara evaluar()
     "+suelo_mojado_suave": {"alfa": 1, "gamma": 1, "rasgos": 1, "lam": 60},
     "base_suave": {"alfa": 1, "gamma": 1, "lam": 30},
 }
-MEJORAS = {"alfa": 1, "gamma": 1}   # lo que usa el pronóstico diario (se elige con evaluar_uruguay)
+MEJORAS = {"alfa": 1, "gamma": 1, "lam": 30}   # lo que usa el pronóstico diario: ganó "base_suave" en evaluar_uruguay (nov 2026)
 
 
 def _fl(mej):
