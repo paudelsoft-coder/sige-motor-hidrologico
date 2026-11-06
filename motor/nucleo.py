@@ -141,6 +141,10 @@ def depurar(serie, salto_max=None):
     d=sorted(abs(b-a) for a,b in zip(v,v[1:]))
     mad=d[len(d)//2] or 0.01
     thr=max(0.8,10*mad)
+    # R1 usa la escala propia del puerto: en el Paraná medio un pico de 0,9 m que vuelve al día siguiente es
+    # imposible, aunque en el Alto Uruguay sería normal. Percentil 99 de los cambios de un día × 1,5.
+    dd=sorted(abs(b-a) for x,y,a,b in zip(f,f[1:],v,v[1:]) if _dias(x,y)==1)
+    thr1=max(0.25,1.5*dd[int(0.99*(len(dd)-1))]) if len(dd)>30 else thr
     malas={}
     while True:
         idx=[i for i in range(len(f)) if f[i] not in malas]
@@ -155,8 +159,8 @@ def depurar(serie, salto_max=None):
                 a,c=v[idx[j-1]],v[idx[j+1]]
                 dev=x-(a+c)/2
                 # R1: pico de un día que sale y vuelve al mismo nivel
-                if abs(dev)>thr and abs(c-a)<0.3*abs(dev) and (x-a)*(x-c)>0:
-                    s=abs(dev)/thr
+                if abs(dev)>thr1 and abs(c-a)<0.3*abs(dev) and (x-a)*(x-c)>0:
+                    s=abs(dev)/thr1
                     if not peor or s>peor[0]: peor=(s,i)
             # R2: lectura fuera del rango de sus vecinos (±5) por más del umbral
             m=sorted(w)[len(w)//2] if w else x
