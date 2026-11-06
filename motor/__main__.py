@@ -10,7 +10,7 @@ Uso:
   python -m motor rapida                solo si el INA publicó alturas nuevas: las guarda y recalcula el pronóstico
   python -m motor historia              baja la serie histórica completa del INA (desde 1900) → sige_hidro_historia
   python -m motor analogos              situaciones parecidas en la historia para cada puerto → sige_hidro_analogos
-  python -m motor evaluar               compara calibrar con 3, 10 y 30 años sobre los últimos 2 años (no guarda nada)
+  python -m motor evaluar               mide si GloFAS (caudal simulado, Open-Meteo) mejora el pronóstico (no guarda nada)
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
@@ -174,32 +174,48 @@ def _series_largas(anios):
 
 
 def evaluar():
-    """Calibra con 3, 10 y 30 años usando datos hasta hace 2 años y mide el error en los 2 años siguientes."""
+    """¿Mejora el pronóstico con GloFAS? Calibra con los 3 años previos a hace 2 años y mide el error en los
+    2 años siguientes, en tres variantes:
+      base    → alturas del INA + Itaipú (lo que corre hoy)
+      +GloFAS → además el caudal GloFAS de los últimos días en puntos aguas arriba (dato que ya existe al pronosticar)
+      +pron.  → además el cambio de caudal que GloFAS anticipa para los próximos 3/7/14 días. En esta prueba se usa
+                lo que GloFAS simuló con la lluvia que realmente cayó, así que es un techo: en la operación real el
+                pronóstico de lluvia tiene error y la mejora va a ser menor."""
+    from . import externas
     from .calibrar import calibrar as cal, ITAIPU_ID
     hoy = dt.date.today()
     corte = hoy - dt.timedelta(days=730)
-    S = _series_largas(32)
-    res = {}
-    for anios in (3, 10, 30):
-        Sc = {k: {f: v for f, v in s.items() if f <= corte.isoformat()} for k, s in S.items()}
-        modelo = cal(estaciones(), Sc, corte, anios=anios, log=lambda *a: None, extras={ITAIPU_ID: "Itaipú (descarga)"})
-        res[anios] = _error_fuera(S, modelo, corte, hoy)
-        print(f"evaluar: {anios} años → {len(modelo)} modelos")
-    print(f"{'puerto':26s} " + " ".join(f"{a:>2d}a·3d {a:>2d}a·7d" for a in (3, 10, 30)) + "  persist·7d")
-    total = {a: [] for a in (3, 10, 30)}
+    S = _series_largas(6)
+    G = externas.caudales((corte - dt.timedelta(days=365 * 3 + 30)).isoformat(), hoy.isoformat())
+    print("evaluar: GloFAS " + ", ".join(f"{externas.PUNTOS[k][0]} {len(v)} días" for k, v in G.items()))
+    S.update(G)
+    variantes = {
+        "base": {ITAIPU_ID: "Itaipú (descarga)"},
+        "+GloFAS": {ITAIPU_ID: "Itaipú (descarga)", **{k: {**v, "futuro": False} for k, v in externas.extras().items()}},
+        "+pron.": {ITAIPU_ID: "Itaipú (descarga)", **externas.extras()},
+    }
+    res, mods = {}, {}
+    Sc = {k: {f: v for f, v in s.items() if f <= corte.isoformat()} for k, s in S.items()}
+    for nom, ex in variantes.items():
+        # para calibrar, la serie GloFAS llega hasta el corte (las ventanas hacia adelante usan días ya pasados)
+        modelo = cal(estaciones(), Sc, corte, anios=3, log=lambda *a: None, extras=ex)
+        res[nom], mods[nom] = _error_fuera(S, modelo, corte, hoy), modelo
+        print(f"evaluar: {nom} → {len(modelo)} modelos")
+    V = list(variantes)
+    print(f"{'puerto':26s} " + " ".join(f"{v:>8s}·3d {v:>8s}·7d" for v in V) + "  persist·7d  entradas (+pron.)")
+    total = {v: [] for v in V}
     for e in estaciones():
         k = e["id"]
-        fila = []
-        for a in (3, 10, 30):
-            r = res[a].get(k)
-            fila.append(f"{r['e3']:7.2f} {r['e7']:7.2f}" if r else "      -       -")
-            if r:
-                total[a].append(r["e7"])
-        per = next((res[a][k]["p7"] for a in (3, 10, 30) if res[a].get(k)), None)
-        print(f"{e['nombre'][:26]:26s} " + " ".join(fila) + (f"  {per:9.2f}" if per else ""))
-    for a in (3, 10, 30):
-        v = total[a]
-        print(f"promedio error 7 días con {a} años: {sum(v) / len(v):.3f} m en {len(v)} puertos" if v else f"{a} años: sin modelos")
+        if not all(res[v].get(k) for v in V):
+            continue
+        fila = [f"{res[v][k]['e3']:11.2f} {res[v][k]['e7']:11.2f}" for v in V]
+        for v in V:
+            total[v].append(res[v][k]["e7"])
+        ent = ", ".join(f"{x['nombre'][:22]} {x['desde']}/{x['hasta']}" for x in mods["+pron."][str(k)]["entradas"])
+        print(f"{e['nombre'][:26]:26s} " + " ".join(fila) + f"  {res['base'][k]['p7']:9.2f}  {ent}")
+    for v in V:
+        t = total[v]
+        print(f"promedio error 7 días {v:8s}: {sum(t) / len(t):.3f} m en {len(t)} puertos")
 
 
 def _error_fuera(S, modelo, desde, hasta):
