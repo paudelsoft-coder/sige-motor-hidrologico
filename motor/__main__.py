@@ -419,10 +419,16 @@ def _lluvia_historica(desde):
     return R
 
 
-def _datos_uruguay(desde):
-    from . import uruguay as U
+def _datos_uruguay(desde, telemetria_dias=0):
+    from . import ana, uruguay as U
     D, informe = U.series_ina(desde)
     print("uruguay: limpieza " + ", ".join(f"{k} -{v['imposibles'] + v['picos'] + v['congelados']}" for k, v in informe.items()))
+    try:   # escalas de Brasil (ANA): si no responde, el modelo sin ellas sigue funcionando
+        for k, v in ana.series(desde, max_telemetria=telemetria_dias).items():
+            D[k], inf = U.limpiar(v, 1, 60000, 15)
+            print(f"uruguay: {k} limpieza -{inf['imposibles'] + inf['picos'] + inf['congelados']}")
+    except Exception as ex:
+        print("uruguay: escalas de Brasil sin datos:", ex)
     B = U.represas_br(desde)
     if not B.get("FOZ_CHAPECO"):
         print("uruguay: faltan las represas de Brasil, las bajo del ONS")
@@ -457,7 +463,7 @@ def uruguay():
         return
     M = U.normalizar(filas[0]["datos"])
     hoy = dt.date.today()
-    D, B = _datos_uruguay((hoy - dt.timedelta(days=90)).isoformat())
+    D, B = _datos_uruguay((hoy - dt.timedelta(days=90)).isoformat(), telemetria_dias=8)
     R = _lluvia_supa((hoy - dt.timedelta(days=90)).isoformat())
     rec = U.lluvia_reciente()
     supa.upsert("sige_hidro_lluvia", [{"zona": z, "fecha": f, "mm": round(v, 2), "tipo": "pronostico", "actualizado": hoy.isoformat()}
