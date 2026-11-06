@@ -19,6 +19,9 @@ LAMBDA = 1.0
 BLOQUES = 4
 SUBE_7D = 0.15
 VENTANAS = [(0, 3), (0, 7), (7, 14)]   # últimos 3 días, última semana y semana anterior
+# Entradas con pronóstico propio (GloFAS): además, cuánto se espera que cambien en los próximos 3, 7 y 14 días.
+# (desde, hasta) negativos = días hacia adelante: h(t+3) − h(t).
+VENTANAS_FUTURO = [(-3, 0), (-7, 0), (-14, 0)]
 # Represas como entradas: id ficticio -> qué puertos pueden usarla (descarga en miles de m³/s)
 ITAIPU_ID = 1000
 
@@ -48,9 +51,17 @@ def diaria(serie: dict, d0: dt.date, d1: dt.date):
     return np.array([np.nan if x is None else x for x in v], dtype=float)
 
 
+def _en(a, i):
+    """a[i] con NaN fuera de rango (las ventanas hacia adelante pueden pasarse del final)."""
+    out = np.full(len(i), np.nan)
+    m = (i >= 0) & (i < len(a))
+    out[m] = a[i[m]]
+    return out
+
+
 def _tabla(S, did, feats):
     hd = S[did]; n = len(hd); T = np.arange(14, n)
-    X = np.stack([S[s][T - a] - S[s][T - b] for s, a, b in feats], 1) if feats else np.zeros((len(T), 0))
+    X = np.stack([_en(S[s], T - a) - _en(S[s], T - b) for s, a, b in feats], 1) if feats else np.zeros((len(T), 0))
     Y = np.full((len(T), H), np.nan)
     for k in range(1, H + 1):
         m = T + k < n
@@ -105,8 +116,10 @@ def _persistencia(hd):
 
 
 def calibrar(estaciones: list, series: dict, hasta: dt.date, anios: int = 3, log=print, extras: dict | None = None):
-    """`series[id]` = {fecha: altura}. `extras` = {id: nombre} de entradas no hidrométricas (p. ej. descarga de
-    Itaipú en miles de m³/s, id 1000) que pueden usar los puertos del río Paraná.
+    """`series[id]` = {fecha: altura}. `extras` = entradas no hidrométricas:
+      {id: nombre}  → solo para puertos del río Paraná, ventanas pasadas (p. ej. descarga de Itaipú, id 1000)
+      {id: {nombre, cuenca, futuro}} → puertos de esa cuenca; si `futuro`, también ventanas hacia adelante
+      (la serie trae el pronóstico, p. ej. caudal GloFAS).
     Devuelve {id: {entradas, w, err, err_sube}} solo para puertos con modelo útil."""
     est = [e for e in estaciones if not e.get("marea")]
     extras = {k: v for k, v in (extras or {}).items() if k in series}
@@ -114,16 +127,22 @@ def calibrar(estaciones: list, series: dict, hasta: dt.date, anios: int = 3, log
     S = {e["id"]: diaria(series.get(e["id"], {}), d0, hasta) for e in est}
     S.update({k: diaria(series[k], d0, hasta) for k in extras})
     nombre = {e["id"]: e["nombre"] for e in est}
-    nombre.update(extras)
+    nombre.update({k: (v["nombre"] if isinstance(v, dict) else v) for k, v in extras.items()})
     modelo = {}
     for e in sorted(est, key=lambda x: x["orden"]):
         did = e["id"]
         if np.isnan(S[did]).mean() > 0.4:
             log(f"{e['nombre']}: pocos datos, sin modelo"); continue
         cands = [u["id"] for u in est if cuenca(u) == cuenca(e) and u["orden"] <= e["orden"] and e["orden"] - u["orden"] <= VENTANA and np.isnan(S[u["id"]]).mean() < 0.4]
-        if e["rio"].startswith("Paraná"):
-            cands += [k for k in extras if np.isnan(S[k]).mean() < 0.4]
         pool = [(s, a, b) for s in cands for a, b in VENTANAS]
+        for k, x in extras.items():
+            if np.isnan(S[k]).mean() >= 0.4:
+                continue
+            if isinstance(x, dict):
+                if x.get("cuenca") == cuenca(e):
+                    pool += [(k, a, b) for a, b in VENTANAS + (VENTANAS_FUTURO if x.get("futuro") else [])]
+            elif e["rio"].startswith("Paraná"):
+                pool += [(k, a, b) for a, b in VENTANAS]
         elegidas, mejor, val = [], None, None
         while len(elegidas) < MAX_ENTRADAS:
             prueba = []
