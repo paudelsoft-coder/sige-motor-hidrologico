@@ -4,7 +4,7 @@ Uso:
   python -m motor ingesta [--dias 40]   descarga alturas del INA → sige_hidro_alturas
   python -m motor calibrar              recalibra pesos con 3 años → sige_hidro_modelo
   python -m motor pronostico            proyección 15 días + cruces de nivel → sige_hidro_pronostico / sige_hidro_cruces
-  python -m motor represas [--desde 2000]  caudales diarios de Itaipú y del Iguazú (ONS) → sige_hidro_represas
+  python -m motor represas [--desde 2000]  caudales diarios de Itaipú y del Iguazú (ONS) y de Salto Grande (INA) → sige_hidro_represas
   python -m motor transito              desfases y reglas de represas (si hay datos en sige_hidro_represas)
   python -m motor todo                  ingesta + represas + pronostico
   python -m motor rapida                solo si el INA publicó alturas nuevas: las guarda y recalcula el pronóstico
@@ -117,7 +117,33 @@ def represas(desde_anio=None):
         supa.upsert("sige_hidro_represas", filas, "represa,fecha")
         total += len(filas)
         print(f"represas {a}: {len(filas)} filas")
+    try:
+        total += salto_grande(f"{desde_anio}-01-01" if desde_anio else (hoy - dt.timedelta(days=60)).isoformat())
+    except Exception as ex:   # si el INA no responde, Itaipú y el resto siguen igual
+        print("represas Salto Grande: sin datos", ex)
     supa.insertar("sige_hidro_corridas", [{"tarea": "represas", "filas": total, "fallos": []}])
+
+
+# Salto Grande (CTM) según el INA: caudal medio diario que entra al embalse, caudal medio diario aguas abajo
+# (lo que eroga la represa) y altura media diaria del embalse.
+SALTO_GRANDE = {"afluente_m3s": 26674, "defluente_m3s": 26675, "cota_m": 26319}
+
+
+def salto_grande(desde):
+    from . import ina, supa
+    hasta = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    datos = {}
+    for campo, serie in SALTO_GRANDE.items():
+        for f, v in ina.observaciones(serie, desde, hasta).items():
+            if v and v > 0:   # el INA guarda ceros cuando falta el dato
+                datos.setdefault(f, {})[campo] = round(float(v), 2)
+        time.sleep(1)
+    filas = [{"represa": "SALTO_GRANDE", "fecha": f, "afluente_m3s": d.get("afluente_m3s"), "turbinado_m3s": None,
+              "vertido_m3s": None, "defluente_m3s": d.get("defluente_m3s"), "cota_m": d.get("cota_m"),
+              "fuente": "INA (CTM Salto Grande)"} for f, d in sorted(datos.items())]
+    supa.upsert("sige_hidro_represas", filas, "represa,fecha")
+    print(f"represas Salto Grande: {len(filas)} días desde {desde}")
+    return len(filas)
 
 
 ANIOS_CAL = 3   # años de historia para calibrar (se decide con `python -m motor evaluar`)
