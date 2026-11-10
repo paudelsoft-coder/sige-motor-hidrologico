@@ -68,11 +68,6 @@ def ingesta(dias=40):
         except Exception as ex:
             fallos.append(f"{e['nombre']}: {ex}")
         time.sleep(0.4)
-    vistos = {(f["estacion_id"], f["fecha"]) for f in filas}
-    for l in _prefectura(fallos):   # lectura de las 00 h que el INA todavía no publicó
-        if l["hora"] == "00:00" and (l["estacion_id"], l["fecha"]) not in vistos:
-            filas.append({"estacion_id": l["estacion_id"], "fecha": l["fecha"], "altura_m": l["altura_m"], "fuente": "PNA"})
-            vistos.add((l["estacion_id"], l["fecha"]))
     supa.upsert("sige_hidro_alturas", filas, "estacion_id,fecha")
     supa.insertar("sige_hidro_corridas", [{"tarea": "ingesta", "filas": len(filas), "fallos": fallos}])
     print(f"ingesta: {len(filas)} lecturas, {len(fallos)} fallos")
@@ -98,13 +93,24 @@ def rapida(dias=3):
         except Exception as ex:
             fallos.append(f"{e['nombre']}: {ex}")
         time.sleep(0.2)
-    for l in _prefectura(fallos):   # Prefectura publica la lectura de las 00 h antes que el INA
-        k = (l["estacion_id"], l["fecha"])
-        if l["hora"] == "00:00" and l["fecha"] >= desde and k not in vistos:
-            vistos.add(k)
-            if antes.get(k) != round(float(l["altura_m"]), 3):
-                nuevas.append({"estacion_id": l["estacion_id"], "fecha": l["fecha"], "altura_m": l["altura_m"], "fuente": "PNA"})
+
     if not nuevas:
+        # Las lecturas de Prefectura las carga la PC de la sala (sige_prefectura.py) directo en la base: si hay un
+        # dato más nuevo que el último pronóstico de algún puerto, se recalcula aunque el INA no haya publicado nada.
+        try:
+            dato = {r["estacion_id"]: r["dato_fecha"] for r in supa.select("sige_hidro_pronostico", {"select": "estacion_id,dato_fecha", "k": "eq.1"})}
+            ult = {}
+            for (eid, f) in antes:
+                ult[eid] = max(ult.get(eid, f), f)
+            ayer = (hoy - dt.timedelta(days=1)).isoformat()
+            nuevos = [eid for eid, f in ult.items() if dato.get(eid) and f > dato[eid] and f >= ayer]
+        except Exception as ex:
+            nuevos = []
+            print("rapida: no se pudo comparar con el último pronóstico:", ex)
+        if nuevos:
+            print(f"rapida: {len(nuevos)} puertos con lectura de Prefectura más nueva que el pronóstico → se recalcula")
+            supa.insertar("sige_hidro_corridas", [{"tarea": "rapida", "filas": 0, "fallos": fallos + [f"PNA nuevos: {len(nuevos)}"]}])
+            return True
         print(f"rapida: sin datos nuevos ({len(fallos)} fallos)")
         return False
     supa.upsert("sige_hidro_alturas", nuevas, "estacion_id,fecha")
