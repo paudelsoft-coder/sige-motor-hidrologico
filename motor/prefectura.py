@@ -45,7 +45,7 @@ def _num(txt):
 def tabla():
     """Filas de la tabla: [{puerto, rio, altura, fecha, hora, altura_ant, fecha_ant, hora_ant}]."""
     req = urllib.request.Request(URL, headers={"User-Agent": UA, "Accept-Language": "es-AR,es"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=15) as r:   # desde servidores fuera de Argentina no responde
         txt = r.read().decode("utf-8", "replace")
     filas = []
     limpio = lambda c: re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", c))).strip()
