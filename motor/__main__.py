@@ -34,6 +34,28 @@ def estaciones():
     return json.load(open(os.path.join(RAIZ, "datos", "estaciones.json"), encoding="utf-8"))["estaciones"]
 
 
+def _prefectura(fallos):
+    """Lecturas de la tabla de Prefectura (más nuevas que las del INA). Guarda la última de cada puerto en
+    sige_hidro_ultima (la "altura actual" del portal) y devuelve todas para completar la serie diaria (00 h)."""
+    from . import prefectura, supa
+    try:
+        lec = prefectura.lecturas(estaciones())
+    except Exception as ex:
+        fallos.append(f"Prefectura: {ex}")
+        return []
+    ult = {}
+    for l in lec:
+        if l["estacion_id"] not in ult or (l["fecha"], l["hora"] or "") > (ult[l["estacion_id"]]["fecha"], ult[l["estacion_id"]]["hora"] or ""):
+            ult[l["estacion_id"]] = l
+    try:
+        ahora = dt.datetime.now(dt.timezone.utc).isoformat()
+        supa.upsert("sige_hidro_ultima", [{**l, "fuente": "PNA", "actualizado": ahora} for l in ult.values()], "estacion_id")
+    except Exception as ex:
+        print("prefectura: no se pudo guardar la última lectura (¿falta la tabla sige_hidro_ultima?):", str(ex)[:120])
+    print(f"prefectura: {len(lec)} lecturas de {len(ult)} puertos")
+    return lec
+
+
 def ingesta(dias=40):
     from . import ina, supa
     hoy = dt.date.today()
@@ -46,6 +68,11 @@ def ingesta(dias=40):
         except Exception as ex:
             fallos.append(f"{e['nombre']}: {ex}")
         time.sleep(0.4)
+    vistos = {(f["estacion_id"], f["fecha"]) for f in filas}
+    for l in _prefectura(fallos):   # lectura de las 00 h que el INA todavía no publicó
+        if l["hora"] == "00:00" and (l["estacion_id"], l["fecha"]) not in vistos:
+            filas.append({"estacion_id": l["estacion_id"], "fecha": l["fecha"], "altura_m": l["altura_m"], "fuente": "PNA"})
+            vistos.add((l["estacion_id"], l["fecha"]))
     supa.upsert("sige_hidro_alturas", filas, "estacion_id,fecha")
     supa.insertar("sige_hidro_corridas", [{"tarea": "ingesta", "filas": len(filas), "fallos": fallos}])
     print(f"ingesta: {len(filas)} lecturas, {len(fallos)} fallos")
@@ -61,15 +88,22 @@ def rapida(dias=3):
     desde, hasta = (hoy - dt.timedelta(days=dias)).isoformat(), (hoy + dt.timedelta(days=1)).isoformat()
     antes = {(r["estacion_id"], r["fecha"]): round(float(r["altura_m"]), 3)
              for r in supa.select("sige_hidro_alturas", {"select": "estacion_id,fecha,altura_m", "fecha": f"gte.{desde}"})}
-    nuevas, fallos = [], []
+    nuevas, fallos, vistos = [], [], set()
     for e in estaciones():
         try:
             for f, v in ina.observaciones(e["serie_id"], desde, hasta, e.get("marea", False)).items():
+                vistos.add((e["id"], f))
                 if antes.get((e["id"], f)) != round(float(v), 3):
                     nuevas.append({"estacion_id": e["id"], "fecha": f, "altura_m": v, "fuente": "INA"})
         except Exception as ex:
             fallos.append(f"{e['nombre']}: {ex}")
         time.sleep(0.2)
+    for l in _prefectura(fallos):   # Prefectura publica la lectura de las 00 h antes que el INA
+        k = (l["estacion_id"], l["fecha"])
+        if l["hora"] == "00:00" and l["fecha"] >= desde and k not in vistos:
+            vistos.add(k)
+            if antes.get(k) != round(float(l["altura_m"]), 3):
+                nuevas.append({"estacion_id": l["estacion_id"], "fecha": l["fecha"], "altura_m": l["altura_m"], "fuente": "PNA"})
     if not nuevas:
         print(f"rapida: sin datos nuevos ({len(fallos)} fallos)")
         return False
@@ -597,6 +631,12 @@ if __name__ == "__main__":
             print("calibrar_uruguay: no se pudo:", ex)
     elif tarea == "calibrar_glofas":
         calibrar_glofas()
+    elif tarea == "prefectura":
+        f = []
+        lec = _prefectura(f)
+        for l in lec[:12]:
+            print("  ", l)
+        print("fallos:", f)
     elif tarea == "calibrar_uruguay":
         calibrar_uruguay()
     elif tarea == "evaluar_uruguay":
