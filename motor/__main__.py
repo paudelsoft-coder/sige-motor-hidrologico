@@ -22,6 +22,7 @@ Uso:
   python -m motor evaluar_cruces        prueba hacia atrás de los avisos de alerta / evacuación (2008-2023)
   python -m motor mejorar               compara variantes del modelo (Brasil, Salto Grande, lluvia) con prueba hacia atrás
   python -m motor prono_ina             guarda el pronóstico oficial del INA del día → sige_hidro_prono_ina
+  python -m motor escenarios            51 escenarios de lluvia (ECMWF): probabilidad de alerta / evacuación → sige_hidro_escenarios
   python -m motor cuencas               lluvia caída / pronosticada, suelo y aporte de cada cuenca (Open-Meteo) → sige_hidro_cuencas
 """
 import datetime as dt
@@ -616,6 +617,23 @@ def _calcular(S, modelo, sube_7d):
     return pron, cru
 
 
+def escenarios():
+    """Pronóstico por escenarios de lluvia (ensamble ECMWF, 51 miembros) → sige_hidro_escenarios. Una vez por día."""
+    from . import supa, mejoras, escenarios as ES
+    S = _series_supa(40)
+    filas = supa.select("sige_hidro_modelo", {"select": "*"})
+    modelo = {str(r["estacion_id"]): r for r in filas}
+    S.update(mejoras.entradas((dt.date.today() - dt.timedelta(days=75)).isoformat(), telemetria_dias=12,
+                              reciente=True, bajar=False))
+    E = ES.bajar()
+    print(f"escenarios: {len(E)} escenarios de lluvia, {max(len(z) for e in E for z in e.values())} días")
+    res = ES.calcular(estaciones(), S, modelo, filas[0]["sube_7d"] if filas else 0.15, E)
+    supa.upsert("sige_hidro_escenarios", res, "estacion_id,dato_fecha")
+    for r in sorted(res, key=lambda r: -(r["prob_alerta"] or 0))[:15]:
+        print(f"  {r['estacion_id']:3d} alerta {r['prob_alerta']}% ({r['dia_alerta'] or '-'}) · evacuación {r['prob_evac']}% "
+              f"· a 7 días {r['p10'][6]}–{r['p90'][6]} m{'' if r['usa_lluvia'] else ' (sin lluvia en el modelo)'}")
+
+
 def pronostico():
     from . import supa
     S = _series_supa(40)
@@ -707,6 +725,8 @@ if __name__ == "__main__":
         prono_ina()
     elif tarea == "cuencas":
         lluvia_cuencas()
+    elif tarea == "escenarios":
+        escenarios()
     elif tarea == "evaluar_cruces":
         from . import revision
         from .modelo import calibrar as cal, ITAIPU_ID
@@ -777,3 +797,7 @@ if __name__ == "__main__":
             lluvia_cuencas()
         except Exception as ex:   # si la tabla todavía no existe o Open-Meteo no responde, lo demás ya quedó
             print("cuencas: sin actualizar:", ex)
+        try:
+            escenarios()
+        except Exception as ex:   # los escenarios son un agregado: si fallan, el pronóstico normal ya quedó
+            print("escenarios: sin actualizar:", ex)
