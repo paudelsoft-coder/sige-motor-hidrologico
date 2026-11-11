@@ -13,7 +13,8 @@ def firmar(url: str) -> str:
         return url
     for libre, pago in (("https://api.open-meteo.com", "https://customer-api.open-meteo.com"),
                         ("https://archive-api.open-meteo.com", "https://customer-archive-api.open-meteo.com"),
-                        ("https://flood-api.open-meteo.com", "https://customer-flood-api.open-meteo.com")):
+                        ("https://flood-api.open-meteo.com", "https://customer-flood-api.open-meteo.com"),
+                        ("https://ensemble-api.open-meteo.com", "https://customer-ensemble-api.open-meteo.com")):
         if url.startswith(libre):
             url = pago + url[len(libre):]
             break
