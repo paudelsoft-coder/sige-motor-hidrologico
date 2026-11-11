@@ -24,6 +24,10 @@ VENTANAS = [(0, 3), (0, 7), (7, 14)]   # últimos 3 días, última semana y sema
 VENTANAS_FUTURO = [(-3, 0), (-7, 0), (-14, 0)]
 # Represas como entradas: id ficticio -> qué puertos pueden usarla (descarga en miles de m³/s)
 ITAIPU_ID = 1000
+# Peso extra de los días de aguas altas al ajustar y al elegir entradas (0 = todos los días pesan igual). Con peso > 0,
+# un día con el río a menos de max(0,5 m; 20 % de la alerta) de la alerta, o subiendo, cuenta 1 + PESO_CRECIDA veces:
+# el modelo se esfuerza en acertar las crecidas, que son pocas, en vez de los días tranquilos.
+PESO_CRECIDA = 0.0
 
 
 def cuenca(e):
@@ -71,15 +75,18 @@ def _tabla(S, did, feats):
     return T[ok], X[ok], Y[ok], sube[ok]
 
 
-def _ajustar(X, y):
+def _ajustar(X, y, w=None):
     m = ~np.isnan(y)
     if m.sum() < 100:
         return None
-    A = X[m]
-    return np.linalg.solve(A.T @ A + LAMBDA * np.eye(A.shape[1]), A.T @ y[m])
+    A, b = X[m], y[m]
+    if w is not None:
+        q = np.sqrt(w[m])[:, None]
+        A, b = A * q, b * q[:, 0]
+    return np.linalg.solve(A.T @ A + LAMBDA * np.eye(A.shape[1]), A.T @ b)
 
 
-def _validar(T, X, Y, sube):
+def _validar(T, X, Y, sube, W=None):
     if len(T) < 200:
         return None
     bordes = np.linspace(T[0], T[-1] + 1, BLOQUES + 1).astype(int)
@@ -88,18 +95,24 @@ def _validar(T, X, Y, sube):
         lo, hi = bordes[f], bordes[f + 1]
         te = (T >= lo) & (T < hi); tr = (T < lo - H) | (T >= hi + H)
         for k in range(H):
-            w = _ajustar(X[tr], Y[tr, k])
+            w = _ajustar(X[tr], Y[tr, k], None if W is None else W[tr])
             if w is None:
                 return None
             E[te, k] = X[te] @ w - Y[te, k]
 
-    def rmse(M, minimo):
+    def rmse(M, minimo, pw=None):
         out = []
         for k in range(H):
-            e = M[:, k]; e = e[~np.isnan(e)]
-            out.append(round(float(np.sqrt(np.mean(e * e))), 3) if len(e) >= minimo else None)
+            e = M[:, k]; ok = ~np.isnan(e)
+            if ok.sum() < minimo:
+                out.append(None); continue
+            ww = pw[ok] if pw is not None else np.ones(ok.sum())
+            out.append(round(float(np.sqrt(np.sum(ww * e[ok] ** 2) / np.sum(ww))), 3))
         return out
-    return rmse(E, 50), rmse(E[sube], 20)
+    if W is None:
+        return rmse(E, 50), rmse(E[sube], 20)
+    # con peso: el puntaje (para elegir entradas) es el error ponderado; las bandas de error quedan sin ponderar
+    return rmse(E, 50), rmse(E[sube], 20), rmse(E, 50, W)
 
 
 def _puntaje(err):
@@ -144,13 +157,23 @@ def calibrar(estaciones: list, series: dict, hasta: dt.date, anios: int = 3, log
             elif e["rio"].startswith("Paraná"):
                 pool += [(k, a, b) for a, b in VENTANAS]
         elegidas, mejor, val = [], None, None
+        pesos = None
+        if PESO_CRECIDA and e.get("alerta") is not None:
+            umbral = e["alerta"] - max(0.5, 0.2 * e["alerta"])
+            def pesos(T, hd=S[did]):
+                h, h7 = hd[T], hd[T - 7]
+                alto = (h >= umbral) | ((h - h7) > SUBE_7D)
+                return np.where(alto, 1.0 + PESO_CRECIDA, 1.0)
+        def validar(feats):
+            T, X, Y, sube = _tabla(S, did, feats)
+            return _validar(T, X, Y, sube, pesos(T) if pesos else None)
         while len(elegidas) < MAX_ENTRADAS:
             prueba = []
             for f in pool:
                 if f in elegidas:
                     continue
-                v = _validar(*_tabla(S, did, elegidas + [f]))
-                sc = _puntaje(v[0]) if v else None
+                v = validar(elegidas + [f])
+                sc = _puntaje(v[2] if v and len(v) > 2 else v[0]) if v else None
                 if sc is not None:
                     prueba.append((sc, f, v))
             if not prueba:
@@ -163,7 +186,8 @@ def calibrar(estaciones: list, series: dict, hasta: dt.date, anios: int = 3, log
         pers = _persistencia(S[did])
         if val and None not in val[0][:7] and sum(val[0][:7]) < sum(x for x in pers[:7] if x is not None):
             T, X, Y, _ = _tabla(S, did, elegidas)
-            W = [[round(float(w), 4) for w in _ajustar(X, Y[:, k])] for k in range(H)]
+            pw = pesos(T) if pesos else None
+            W = [[round(float(w), 4) for w in _ajustar(X, Y[:, k], pw)] for k in range(H)]
             modelo[str(did)] = {"entradas": [{"id": s, "nombre": nombre[s], "desde": a, "hasta": b} for s, a, b in elegidas],
                                 "w": W, "err": val[0], "err_sube": val[1]}
             log(f"{e['nombre']}: modelo con {len(elegidas)} entradas, error a 7 días {val[0][6]} m")
