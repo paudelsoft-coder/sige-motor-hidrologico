@@ -22,7 +22,7 @@ import urllib.request
 
 import numpy as np
 
-from . import ina, om
+from . import a5, om
 
 SERIES = {"sg": 26674, "def": 26675, "cota": 26319, "libres": 26669, "stome": 26665, "sob": 26658,
           "conc": 26321, "colon": 80, "cdu": 81}
@@ -118,7 +118,7 @@ def series_ina(desde, hasta=None):
     hasta = hasta or (dt.date.today() + dt.timedelta(days=1)).isoformat()
     D, informe = {}, {}
     for k, sid in SERIES.items():
-        crudo = ina.observaciones(sid, desde, hasta)
+        crudo = a5.observaciones(sid, desde, hasta)
         D[k], informe[k] = limpiar(crudo, *LIMITES[k], CONGELADO.get(k, 10))
         time.sleep(0.5)
     return D, informe
