@@ -34,18 +34,19 @@ Corre de fondo, sin costo, en GitHub Actions. Cada hora descarga las alturas del
 - el tránsito por tramos (Muskingum);
 - la regla de apertura del vertedero de Yacyretá.
 
-## Probar sin conectarse
+## Cómo pronostica (código propio del SIGE)
 
-```
-pip install -r requirements.txt
-python -m motor prueba
-```
+- `calidad.py`: control de calidad de las alturas (ceros, tipeos, picos de un día, último dato imposible) con estadística robusta; devuelve las crecidas rápidas que confirma un puerto vecino.
+- `modelo.py`: modelo "sige2" por puerto. Para cada horizonte (1 a 15 días) predice el cambio de altura con diferencias de las series de aguas arriba (puertos, represas de Brasil y Salto Grande, ríos de la ANA, lluvia caída y pronosticada por zona). Regresión elastic-net con validación cruzada por bloques; banda = cuantiles 10 % y 90 % del error fuera de muestra. Calibra con 7 años.
+- `proyeccion.py`: proyección a 15 días y momento de cruce de alerta / evacuación.
+- `analogos.py`: situaciones parecidas en la historia de cada puerto.
+- `a5.py`: descarga de la API pública del Sistema de Alerta del INA.
 
-Calcula con los datos de `pruebas/` (alturas reales del 04/11/2026) y lista los cruces.
+Prueba hacia atrás (`python -m motor mejorar`, 2011–2026, dos períodos que el modelo no vio): en alerta detecta el 44 % de los días con cruce real en 15 días, con 37 % de avisos que no se cumplieron.
 
 ## Licencias y fuentes
 
 - Alturas y niveles: INA, Alerta Hidrológico Cuenca del Plata; escalas de Prefectura Naval Argentina.
-- El método de proyección y la descarga del INA están adaptados de Vigía del Paraná, bajo [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). Esa licencia permite el uso a organismos públicos y de seguridad sin fines comerciales.
-
-Required Notice: Copyright (c) 2026 Melisa Franzotti — Vigía del Paraná (https://vigia-del-parana.github.io)
+- Represas de Brasil: ONS (datos abiertos). Ríos de Brasil: ANA (HidroWeb). Salto Grande: CTM vía INA.
+- Lluvia: Open-Meteo (ERA5 y modelos de pronóstico), CC BY 4.0.
+- Todo el código de este repositorio es propio del SIGE.
