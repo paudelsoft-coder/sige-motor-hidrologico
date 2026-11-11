@@ -30,8 +30,22 @@ def _req(method, path, body=None, headers=None, params=None):
     return json.loads(txt)
 
 
+# Clave de cada tabla: al paginar, el orden tiene que ser total. Sin orden (o con empates, p. ej. solo por fecha) la base
+# puede devolver las filas en otro orden en cada página y se saltean o repiten filas: así se "perdían" años enteros de
+# historia de algunos puertos al calibrar.
+CLAVES = {"sige_hidro_historia": "estacion_id,anio", "sige_hidro_alturas": "estacion_id,fecha",
+          "sige_hidro_represas": "represa,fecha", "sige_hidro_lluvia": "zona,fecha,tipo", "sige_hidro_glofas": "punto_id,fecha",
+          "sige_hidro_pron_prueba": "estacion_id,emitido,k", "sige_hidro_pronostico": "estacion_id,k",
+          "sige_hidro_modelo": "estacion_id", "sige_hidro_modelo_glofas": "estacion_id", "sige_hidro_modelo_uruguay": "id",
+          "sige_hidro_cuencas": "cuenca", "sige_hidro_prono_ina": "estacion_id,modelo,emitido,fecha,nivel",
+          "sige_hidro_pron_archivo": "estacion_id,dato_fecha,k"}
+
+
 def select(tabla, params=None, pagina=1000):
-    """Lee todas las filas (paginando con Range)."""
+    """Lee todas las filas (paginando con Range, con orden total para no perder ni repetir filas entre páginas)."""
+    params = dict(params or {})
+    if tabla in CLAVES:
+        params["order"] = (params["order"] + "," if params.get("order") else "") + CLAVES[tabla]
     out, ini = [], 0
     while True:
         filas = _req("GET", tabla, params=params, headers={"Range-Unit": "items", "Range": f"{ini}-{ini + pagina - 1}"})
