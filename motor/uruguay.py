@@ -22,7 +22,7 @@ import urllib.request
 
 import numpy as np
 
-from . import ina
+from . import ina, om
 
 SERIES = {"sg": 26674, "def": 26675, "cota": 26319, "libres": 26669, "stome": 26665, "sob": 26658,
           "conc": 26321, "colon": 80, "cdu": 81}
@@ -139,7 +139,7 @@ def represas_br(desde):
 def _get_json(url, intentos=6):
     for i in range(intentos):
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "sige-motor"}), timeout=120) as r:
+            with urllib.request.urlopen(urllib.request.Request(om.firmar(url), headers={"User-Agent": "sige-motor"}), timeout=120) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as ex:
             if ex.code == 429 and i < intentos - 1:
