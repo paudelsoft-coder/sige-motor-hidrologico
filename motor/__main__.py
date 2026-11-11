@@ -23,7 +23,6 @@ Uso:
   python -m motor mejorar               compara variantes del modelo (Brasil, Salto Grande, lluvia) con prueba hacia atrás
   python -m motor prono_ina             guarda el pronóstico oficial del INA del día → sige_hidro_prono_ina
   python -m motor cuencas               lluvia caída / pronosticada, suelo y aporte de cada cuenca (Open-Meteo) → sige_hidro_cuencas
-  python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
 import json
@@ -31,7 +30,7 @@ import os
 import sys
 import time
 
-from . import nucleo
+from . import base, calidad, proyeccion
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -63,13 +62,13 @@ def _prefectura(fallos):
 
 
 def ingesta(dias=40):
-    from . import ina, supa
+    from . import a5, supa
     hoy = dt.date.today()
     desde, hasta = (hoy - dt.timedelta(days=dias)).isoformat(), (hoy + dt.timedelta(days=1)).isoformat()
     filas, fallos = [], []
     for e in estaciones():
         try:
-            s = ina.observaciones(e["serie_id"], desde, hasta, e.get("marea", False))
+            s = a5.observaciones(e["serie_id"], desde, hasta, e.get("marea", False))
             filas += [{"estacion_id": e["id"], "fecha": f, "altura_m": v, "fuente": "INA"} for f, v in s.items()]
         except Exception as ex:
             fallos.append(f"{e['nombre']}: {ex}")
@@ -84,7 +83,7 @@ def ingesta(dias=40):
 def rapida(dias=3):
     """Revisión liviana (cada 10 minutos por la mañana): baja los últimos días del INA y solo guarda y recalcula
     si apareció un dato nuevo o corregido. Así el portal no se recarga cuando no cambió nada."""
-    from . import ina, supa
+    from . import a5, supa
     hoy = dt.date.today()
     desde, hasta = (hoy - dt.timedelta(days=dias)).isoformat(), (hoy + dt.timedelta(days=1)).isoformat()
     antes = {(r["estacion_id"], r["fecha"]): round(float(r["altura_m"]), 3)
@@ -92,7 +91,7 @@ def rapida(dias=3):
     nuevas, fallos, vistos = [], [], set()
     for e in estaciones():
         try:
-            for f, v in ina.observaciones(e["serie_id"], desde, hasta, e.get("marea", False)).items():
+            for f, v in a5.observaciones(e["serie_id"], desde, hasta, e.get("marea", False)).items():
                 vistos.add((e["id"], f))
                 if antes.get((e["id"], f)) != round(float(v), 3):
                     nuevas.append({"estacion_id": e["id"], "fecha": f, "altura_m": v, "fuente": "INA"})
@@ -132,7 +131,7 @@ def _series_supa(dias):
     """Alturas por estación (depuradas) y, como entrada extra (id 1000), la descarga de Itaipú en miles de m³/s.
     Las alturas quedan guardadas tal cual las publica el INA; la depuración se hace al leerlas."""
     from . import supa
-    from .calibrar import ITAIPU_ID
+    from .modelo import ITAIPU_ID
     desde = (dt.date.today() - dt.timedelta(days=max(dias, 400))).isoformat()   # ≥ 400 días para conocer el salto creíble
     corte = (dt.date.today() - dt.timedelta(days=dias)).isoformat()
     S = {}
@@ -140,12 +139,10 @@ def _series_supa(dias):
         S.setdefault(r["estacion_id"], {})[r["fecha"]] = float(r["altura_m"])
     DESCARTADAS.clear()
     for k in list(S):
-        limpia, _ = nucleo.depurar(S[k])
-        limpia, malas = nucleo.depurar(S[k], nucleo.salto_tipico(limpia))
-        S[k] = limpia
+        S[k], malas = calidad.limpiar_dos_pasos(S[k])
         if malas:
             DESCARTADAS[k] = malas
-    nucleo.restituir(S, DESCARTADAS, estaciones())   # crecidas rápidas confirmadas por un puerto vecino
+    calidad.restituir(S, DESCARTADAS, estaciones())   # crecidas rápidas confirmadas por un puerto vecino
     for k in list(S):
         S[k] = {f: v for f, v in S[k].items() if f >= corte}
         if not DESCARTADAS.get(k):
@@ -184,11 +181,11 @@ SALTO_GRANDE = {"afluente_m3s": 26674, "defluente_m3s": 26675, "cota_m": 26319}
 
 
 def salto_grande(desde):
-    from . import ina, supa
+    from . import a5, supa
     hasta = (dt.date.today() + dt.timedelta(days=1)).isoformat()
     datos = {}
     for campo, serie in SALTO_GRANDE.items():
-        for f, v in ina.observaciones(serie, desde, hasta).items():
+        for f, v in a5.observaciones(serie, desde, hasta).items():
             if v and v > 0:   # el INA guarda ceros cuando falta el dato
                 datos.setdefault(f, {})[campo] = round(float(v), 2)
         time.sleep(1)
@@ -200,19 +197,20 @@ def salto_grande(desde):
     return len(filas)
 
 
-ANIOS_CAL = 3   # años de historia para calibrar (se decide con `python -m motor mejorar`)
+ANIOS_CAL = 7   # años de historia para calibrar (elegido con `python -m motor mejorar`, corrida #371)
 # Entradas además de las alturas e Itaipú (ver mejoras.py; se decide con `python -m motor mejorar`):
 #   brasil = represas del ONS, ríos de la ANA y Salto Grande · lluvia = lluvia caída por zona · futuro = lluvia pronosticada
-ENTRADAS_CAL = {"brasil": False, "lluvia": False, "futuro": False, "max": 4}
+ENTRADAS_CAL = {"brasil": True, "lluvia": True, "futuro": True, "max": 12}
+PESO_CAL = 0.0   # peso extra de los días de crecida al calibrar (4 no mejoró en la prueba)
 
 
 def historia():
     """Serie diaria completa del INA para cada puerto, guardada compacta: una fila por puerto y año."""
-    from . import ina, supa
+    from . import a5, supa
     hasta = (dt.date.today() + dt.timedelta(days=1)).isoformat()
     for e in estaciones():
         try:
-            s = ina.observaciones(e["serie_id"], "1900-01-01", hasta, e.get("marea", False))
+            s = a5.observaciones(e["serie_id"], "1900-01-01", hasta, e.get("marea", False))
         except Exception as ex:
             print(f"historia {e['nombre']}: sin datos ({ex})")
             continue
@@ -245,15 +243,14 @@ def _historia_supa(desde_anio=1900):
 def _series_largas(anios):
     """Historia depurada de `anios` años + Itaipú, para calibrar."""
     from . import supa
-    from .calibrar import ITAIPU_ID
+    from .modelo import ITAIPU_ID
     S = _historia_supa(dt.date.today().year - anios - 1)
     if not S:   # sin historia cargada: lo de siempre
         return _series_supa(365 * anios + 10)
     malas = {}
     for k in list(S):
-        limpia, _ = nucleo.depurar(S[k])
-        S[k], malas[k] = nucleo.depurar(S[k], nucleo.salto_tipico(limpia))
-    nucleo.restituir(S, malas, estaciones())   # crecidas rápidas confirmadas por un puerto vecino
+        S[k], malas[k] = calidad.limpiar_dos_pasos(S[k])
+    calidad.restituir(S, malas, estaciones())   # crecidas rápidas confirmadas por un puerto vecino
     desde = (dt.date.today() - dt.timedelta(days=365 * anios + 10)).isoformat()
     for r in supa.select("sige_hidro_represas", {"select": "fecha,defluente_m3s", "represa": "eq.ITAIPU", "fecha": f"gte.{desde}"}):
         if r["defluente_m3s"] is not None:
@@ -270,7 +267,7 @@ def evaluar():
                 lo que GloFAS simuló con la lluvia que realmente cayó, así que es un techo: en la operación real el
                 pronóstico de lluvia tiene error y la mejora va a ser menor."""
     from . import externas
-    from .calibrar import calibrar as cal, ITAIPU_ID
+    from .modelo import calibrar as cal, ITAIPU_ID
     hoy = dt.date.today()
     corte = hoy - dt.timedelta(days=730)
     S = _series_largas(6)
@@ -320,14 +317,15 @@ def _error_fuera(S, modelo, desde, hasta):
             f += dt.timedelta(days=2)
             if t not in s:
                 continue
-            x = [nucleo.cambio_entrada(S.get(int(en["id"]), {}), t, en["desde"], en["hasta"]) for en in M["entradas"]]
+            x = [proyeccion.diferencia(S.get(int(en["id"]), {}), t, en["desde"], en["hasta"]) for en in M["entradas"]]
             if any(v is None for v in x):
                 continue
             for kk, lista in ((3, e3), (7, e7)):
-                obs = s.get(nucleo.sumar_dias(t, kk))
+                obs = s.get(base.mover(t, kk))
                 if obs is None:
                     continue
-                c = s[t] + sum(w * v for w, v in zip(M["w"][kk - 1], x))
+                b0, *c = M["w"][kk - 1]
+                c = s[t] + b0 + sum(w * v for w, v in zip(c, x))
                 lista.append(c - obs)
                 if kk == 7:
                     p7.append(s[t] - obs)
@@ -339,18 +337,17 @@ def _error_fuera(S, modelo, desde, hasta):
 
 def analogos():
     """Situaciones parecidas en la historia (toda la serie disponible) para cada puerto → sige_hidro_analogos."""
-    from . import supa
+    from . import supa, analogos as AN
     S = _historia_supa(1900)
-    ahora = dt.datetime.now(nucleo.ART).isoformat(timespec="minutes")
+    ahora = dt.datetime.now(base.ART).isoformat(timespec="minutes")
     filas = []
     for e in estaciones():
         s = S.get(e["id"])
         if not s:
             continue
-        limpia, _ = nucleo.depurar(s)
-        limpia, _ = nucleo.depurar(s, nucleo.salto_tipico(limpia))
+        limpia, _ = calidad.limpiar_dos_pasos(s)
         sin = float("inf")   # puertos sin niveles oficiales: solo la parte de alturas, sin cruces de nivel
-        r = nucleo.analogos(limpia, e["alerta"] if e["alerta"] is not None else sin, e["evac"] if e["evac"] is not None else sin)
+        r = AN.analogos(limpia, e["alerta"] if e["alerta"] is not None else sin, e["evac"] if e["evac"] is not None else sin)
         if not r:
             continue
         sit, res, casos = r
@@ -362,8 +359,8 @@ def analogos():
 
 def calibrar():
     from . import supa
-    from .calibrar import calibrar as cal, SUBE_7D, ITAIPU_ID
-    from . import calibrar as C, mejoras
+    from . import modelo as MO, mejoras
+    cal, SUBE_7D, ITAIPU_ID = MO.calibrar, MO.SUBE_7D, MO.ITAIPU_ID
     S = _series_largas(ANIOS_CAL) if ANIOS_CAL > 3 else _series_supa(365 * 3 + 10)
     extras = {ITAIPU_ID: "Itaipú (descarga)"}
     if ENTRADAS_CAL["brasil"] or ENTRADAS_CAL["lluvia"]:
@@ -371,7 +368,7 @@ def calibrar():
         for k, m in mejoras.meta().items():
             if k in S and (ENTRADAS_CAL["lluvia"] if m["tipo"] == "lluvia" else ENTRADAS_CAL["brasil"]):
                 extras[k] = {**m, "futuro": m["tipo"] == "lluvia" and ENTRADAS_CAL["futuro"]}
-    C.MAX_ENTRADAS = ENTRADAS_CAL["max"]
+    MO.MAX_ENTRADAS, MO.PESO_CRECIDA = ENTRADAS_CAL["max"], PESO_CAL
     modelo = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CAL, extras=extras)
     hoy = dt.date.today().isoformat()
     supa.upsert("sige_hidro_modelo", [{"estacion_id": int(k), "calibrado": hoy, "sube_7d": SUBE_7D, **v} for k, v in modelo.items()], "estacion_id")
@@ -391,7 +388,7 @@ def _glofas_supa(desde):
 def calibrar_glofas():
     """Igual que calibrar(), pero con el caudal GloFAS como entrada posible → sige_hidro_modelo_glofas."""
     from . import externas, supa
-    from .calibrar import calibrar as cal, SUBE_7D, ITAIPU_ID
+    from .modelo import calibrar as cal, SUBE_7D, ITAIPU_ID
     hoy = dt.date.today()
     S = _series_supa(365 * 3 + 10)
     S.update(externas.caudales((hoy - dt.timedelta(days=365 * 3 + 40)).isoformat(), hoy.isoformat()))
@@ -419,10 +416,10 @@ def glofas_prueba():
     S.update(G)
     filas = []
     for e in estaciones():
-        pg = nucleo.proyectar(S, mg, e["id"])
+        pg = proyeccion.proyectar(S, mg, e["id"])
         if not pg:
             continue
-        base = {q["k"]: q["central"] for q in (nucleo.proyectar(S, mb, e["id"]) or [])}
+        base = {q["k"]: q["central"] for q in (proyeccion.proyectar(S, mb, e["id"]) or [])}
         filas += [{"estacion_id": e["id"], "emitido": hoy.isoformat(), "dato_fecha": max(S[e["id"]]), "k": q["k"],
                    "fecha": q["fecha"], "central": q["central"], "base_central": base.get(q["k"])} for q in pg]
     supa.upsert("sige_hidro_pron_prueba", filas, "estacion_id,emitido,k")
@@ -577,24 +574,22 @@ def lluvia_cuencas():
 def mejorar():
     """Compara formas de pronosticar (años de calibración, represas y ríos de Brasil, Salto Grande, lluvia caída y
     pronosticada) con una prueba hacia atrás de los avisos de alerta / evacuación. No cambia el pronóstico del portal."""
-    from . import revision, mejoras, calibrar as C, modelo as MO
+    from . import revision, mejoras, modelo as MO
     est = estaciones()
     S = _series_largas(dt.date.today().year - 2009)
     S.update(mejoras.entradas("2009-01-01"))
     M = mejoras.meta()
     print("mejorar: entradas nuevas " + ", ".join(f"{M[k]['nombre']} {len(S[k])} d" for k in M if k in S), flush=True)
-    ita = {C.ITAIPU_ID: "Itaipú (descarga)"}
+    ita = {MO.ITAIPU_ID: "Itaipú (descarga)"}
     br = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] != "lluvia" and k in S}
     ll = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
     llf = {k: {**m, "futuro": True} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
-    variantes = [("hoy: modelo anterior, 3 años", 3, ita, 4, 0),
-                 ("anterior + Brasil y lluvia pron.", 7, {**ita, **br, **llf}, 6, 0),
-                 ("NUEVO + Brasil y SG", 7, {**ita, **br}, 12, 0, MO),
-                 ("NUEVO + Brasil y lluvia pron.", 7, {**ita, **br, **llf}, 12, 0, MO),
-                 ("NUEVO + Brasil y lluvia pron. · peso 4", 7, {**ita, **br, **llf}, 12, 4, MO)]
+    variantes = [("solo alturas e Itaipú", 7, ita, 12, 0),
+                 ("Brasil y SG", 7, {**ita, **br}, 12, 0),
+                 ("Brasil y lluvia pron. (el del portal)", 7, {**ita, **br, **llf}, 12, 0)]
     hoy = dt.date.today() - dt.timedelta(days=20)
     folds = [(dt.date(2018, 12, 31), "2019-01-01", hoy.isoformat()), (hoy, "2011-06-01", "2018-12-31")]
-    revision.comparar(est, S, variantes, folds, C)
+    revision.comparar(est, S, variantes, folds, MO)
 
 
 def prono_ina():
@@ -606,14 +601,14 @@ def prono_ina():
 
 
 def _calcular(S, modelo, sube_7d):
-    emitido = dt.datetime.now(nucleo.ART).isoformat(timespec="minutes")
+    emitido = dt.datetime.now(base.ART).isoformat(timespec="minutes")
     pron, cru = [], []
     for e in estaciones():
-        proy = nucleo.proyectar(S, modelo, e["id"], sube_7d)
+        proy = proyeccion.proyectar(S, modelo, e["id"], sube_7d)
         if not proy:
             continue
         pron += [{"estacion_id": e["id"], "emitido": emitido, "dato_fecha": max(S[e["id"]]), **q} for q in proy]
-        for ev in (nucleo.cruces(S[e["id"]], proy, e["alerta"], e["evac"]) if e["alerta"] is not None and e["evac"] is not None else []):
+        for ev in (proyeccion.cruces(S[e["id"]], proy, e["alerta"], e["evac"]) if e["alerta"] is not None and e["evac"] is not None else []):
             # PostgREST exige las mismas columnas en todas las filas de un lote
             fila = {"estacion_id": e["id"], "emitido": emitido, **{k: None for k in COLUMNAS_CRUCE}}
             fila.update({k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in ev.items()})
@@ -632,10 +627,13 @@ def pronostico():
                                   reciente=True, bajar=False))
     sube = filas[0]["sube_7d"] if filas else 0.15
     pron, cru = _calcular(S, modelo, sube)
+    if not pron:   # p. ej. modelos de un formato viejo: se deja el último pronóstico en vez de dejar el portal vacío
+        print("pronostico: ningún puerto pudo proyectarse (¿falta recalibrar?); queda el pronóstico anterior")
+        return
     supa.borrar("sige_hidro_pronostico", {"estacion_id": "gte.0"})
     supa.insertar("sige_hidro_pronostico", pron)
     try:   # archivo para comparar con el INA y con lo que pasó (uno por puerto, día del dato y horizonte)
-        version = "v2" if any(int(en["id"]) > 1000 for r in filas for en in (r.get("entradas") or [])) else "v1"
+        version = "sige2"
         supa.upsert("sige_hidro_pron_archivo", [{"estacion_id": q["estacion_id"], "dato_fecha": q["dato_fecha"], "k": q["k"],
                                                  "fecha": q["fecha"], "central": q["central"], "min": q["min"], "max": q["max"],
                                                  "version": version} for q in pron], "estacion_id,dato_fecha,k")
@@ -686,18 +684,6 @@ def _col(rep, idx, nombre, campo, n):
     return a
 
 
-def prueba():
-    a = json.load(open(os.path.join(RAIZ, "pruebas", "alturas_vigia.json"), encoding="utf-8"))
-    m = json.load(open(os.path.join(RAIZ, "pruebas", "modelo_vigia.json"), encoding="utf-8"))
-    S = {s["id"]: dict((f, v) for f, v in s["serie"]) for s in a["estaciones"]}
-    pron, cru = _calcular(S, m["estaciones"], m["sube_7d"])
-    nom = {e["id"]: e["nombre"] for e in estaciones()}
-    print(f"{len(pron)} filas de pronóstico, {len(cru)} cruces")
-    for c in sorted(cru, key=lambda x: x["momento"] or "9"):
-        if c["tipo"] != "POSIBLE":
-            print(f"  {nom[c['estacion_id']]:28s} {c['tipo']:6s} {c['nivel']:10s} {c['momento'] or 'más de 15 días'}")
-
-
 if __name__ == "__main__":
     tarea = sys.argv[1] if len(sys.argv) > 1 else "todo"
     if tarea == "ingesta":
@@ -723,7 +709,7 @@ if __name__ == "__main__":
         lluvia_cuencas()
     elif tarea == "evaluar_cruces":
         from . import revision
-        from .calibrar import calibrar as cal, ITAIPU_ID
+        from .modelo import calibrar as cal, ITAIPU_ID
         corte = dt.date(2007, 12, 31)   # modelos de prueba calibrados antes de los años que se evalúan (2008-2023)
         S = _series_largas(dt.date.today().year - 1998)
         Sc = {k: {f: v for f, v in s.items() if f <= corte.isoformat()} for k, s in S.items()}
@@ -754,8 +740,6 @@ if __name__ == "__main__":
         transito()
     elif tarea == "represas":
         represas(int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--desde" else None)
-    elif tarea == "prueba":
-        prueba()
     elif tarea == "rapida":
         if rapida():
             pronostico()
