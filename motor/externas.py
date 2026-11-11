@@ -18,6 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import om
+
 URL = "https://flood-api.open-meteo.com/v1/flood"
 
 # id: (nombre, lat, lon, cuenca)    ids 1100+ Paraná/Paraguay, 1200+ Uruguay
@@ -45,7 +47,7 @@ def _pedir(ids, desde, hasta):
     url = URL + "?" + urllib.parse.urlencode(q, safe=",")
     for intento in range(4):
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "sige-motor"}), timeout=120) as r:
+            with urllib.request.urlopen(urllib.request.Request(om.firmar(url), headers={"User-Agent": "sige-motor"}), timeout=120) as r:
                 j = json.loads(r.read().decode())
             return j if isinstance(j, list) else [j]
         except urllib.error.HTTPError as ex:
