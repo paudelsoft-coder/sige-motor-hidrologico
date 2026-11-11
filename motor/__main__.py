@@ -17,6 +17,9 @@ Uso:
   python -m motor calibrar_uruguay      modelo del río Uruguay (Salto Grande → Concordia) → sige_hidro_modelo_uruguay
   python -m motor evaluar_uruguay       prueba del modelo del Uruguay con todos los datos desde 2021 (no guarda nada)
   python -m motor uruguay               pronóstico de prueba del río Uruguay → sige_hidro_pron_uruguay (también corre con todo)
+  python -m motor auditar               revisa la historia de cada puerto (vacíos, imposibles, picos) sin cambiar nada
+  python -m motor auditar_borrar        lo mismo y borra las filas sin ningún valor
+  python -m motor evaluar_cruces        prueba hacia atrás de los avisos de alerta / evacuación (2008-2023)
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
@@ -635,6 +638,12 @@ if __name__ == "__main__":
             calibrar_uruguay()
         except Exception as ex:
             print("calibrar_uruguay: no se pudo:", ex)
+    elif tarea in ("auditar", "auditar_borrar"):
+        from . import revision
+        revision.auditar(estaciones(), borrar=tarea == "auditar_borrar")
+    elif tarea == "evaluar_cruces":
+        from . import revision
+        revision.evaluar_cruces(estaciones(), _series_largas)
     elif tarea == "calibrar_glofas":
         calibrar_glofas()
     elif tarea == "prefectura":
