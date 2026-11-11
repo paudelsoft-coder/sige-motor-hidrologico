@@ -136,6 +136,9 @@ def auditar(est, borrar=False):
     for k, s in S.items():
         l0, _ = nucleo.depurar(s)
         limpia[k], desc[k] = nucleo.depurar(s, nucleo.salto_tipico(l0))
+    vuelven = nucleo.restituir(limpia, desc, est)
+    I(f"Crecidas rápidas que la limpieza descartaba y ahora se devuelven (un puerto vecino las confirma): "
+      f"{sum(len(v) for v in vuelven.values())} lecturas en {len(vuelven)} puertos.")
     filas, perdidas = [], []
     hoy = dt.date.today()
     for e in sorted(est, key=lambda x: x["orden"]):
@@ -259,31 +262,11 @@ def _cruce(v, L):
     return None
 
 
-def evaluar_cruces(est, series_largas, desde="2008-01-01", hasta=None):
-    from . import supa
-    filas_m = supa.select("sige_hidro_modelo", {"select": "*"})
-    modelo = {r["estacion_id"]: r for r in filas_m}
-    calibrado = min((r.get("calibrado") or "9999") for r in filas_m)
-    sube_7d = filas_m[0].get("sube_7d") or 0.15 if filas_m else 0.15
-    if hasta is None:   # solo días que el modelo no vio al calibrarse (calibra con los 3 años previos)
-        hasta = (dt.date.fromisoformat(calibrado) - dt.timedelta(days=365 * 3 + 20)).isoformat()
-    I = Informe(f"Prueba hacia atrás de los avisos de alerta y evacuación ({desde} a {hasta}, fuera de calibración)")
-    anios = dt.date.today().year - int(desde[:4]) + 1
-    S = series_largas(anios)
-    d0 = dt.date.fromisoformat(desde) - dt.timedelta(days=30)
-    d1 = dt.date.fromisoformat(hasta)
-    n = (d1 - d0).days + 16
-    A = {k: _arr(s, d0, n) for k, s in S.items()}
-    t_ini, t_fin = 30, (d1 - d0).days
-    I(f"Modelo calibrado el {calibrado}. Cada día se pronostica con lo que se sabía ese día y se compara con lo que pasó "
-      f"en los 15 días siguientes. Solo días en que el puerto estaba por debajo del nivel.")
-    I("ACIERTO = avisó y entró · FALSA = avisó y no entró (ni 3 días después) · PERDIDA = entró sin aviso · "
-      "error = diferencia entre el día anunciado y el real (+ = el aviso llegó antes de lo real, el río tardó más).")
-    resumen = {"ALERTA": [], "EVACUACION": []}
-    filas_por = {"ALERTA": [], "EVACUACION": []}
-    eventos_txt = []
+def _probar(est, modelo, A, n, t_ini, t_fin, d0, sube_7d):
+    """Pronostica cada día con `modelo` y cuenta aciertos / falsas / perdidas por puerto y nivel."""
+    out = {"ALERTA": [], "EVACUACION": []}
     for e in sorted(est, key=lambda x: x["orden"]):
-        M = modelo.get(e["id"])
+        M = modelo.get(e["id"]) or modelo.get(str(e["id"]))
         a = A.get(e["id"])
         if not M or a is None or e["alerta"] is None or e["evac"] is None or not M.get("w"):
             continue
@@ -292,18 +275,17 @@ def evaluar_cruces(est, series_largas, desde="2008-01-01", hasta=None):
             u = A.get(int(en["id"]))
             X.append(_cambio(u, en["desde"], en["hasta"]) if u is not None else np.full(n, np.nan))
         X = np.array(X)
-        W = np.array(M["w"])              # 15 × entradas
-        P = a[None, :] + W @ X            # 15 × n : central para k = 1..15
+        P = a[None, :] + np.array(M["w"]) @ X            # 15 × n : central para k = 1..15
         h7 = np.concatenate([np.full(7, np.nan), a[:-7]])
         sube = (a - h7) > sube_7d
         err = np.array([x if x is not None else np.nan for x in (M.get("err") or [np.nan] * 15)])
         errs = np.array([x if x is not None else np.nan for x in (M.get("err_sube") or M.get("err") or [np.nan] * 15)])
         for L, niv in ((e["alerta"], "ALERTA"), (e["evac"], "EVACUACION")):
-            ac, fa, pe, cn, errd, posib_ok, posib_fa = 0, 0, 0, 0, [], 0, 0
+            r = {"puerto": e["nombre"], "ac": 0, "fa": 0, "pe": 0, "sd": 0, "errd": [], "po": 0, "ev": []}
             aviso = np.zeros(n, bool)
             for t in range(t_ini, t_fin):
                 h0 = a[t]
-                if np.isnan(h0) or h0 >= L or np.isnan(P[:, t]).any():
+                if np.isnan(h0) or h0 >= L:
                     continue
                 obs = a[t:t + 19]
                 ok = ~np.isnan(obs)
@@ -311,73 +293,95 @@ def evaluar_cruces(est, series_largas, desde="2008-01-01", hasta=None):
                     continue
                 o = np.interp(np.arange(19), np.nonzero(ok)[0], obs[ok])
                 real = _cruce(o[:16], L)
+                if np.isnan(P[:, t]).any():   # sin pronóstico ese día (faltaba un dato de entrada)
+                    if real is not None:
+                        r["sd"] += 1
+                    continue
                 real_tarde = _cruce(o, L)
-                c = np.concatenate([[h0], P[:, t]])
-                pred = _cruce(c, L)
+                pred = _cruce(np.concatenate([[h0], P[:, t]]), L)
                 e_k = errs if sube[t] else err
                 pmax = _cruce(np.concatenate([[h0], P[:, t] + np.nan_to_num(e_k)]), L)
                 if pred is not None:
                     aviso[t] = True
                     if real_tarde is not None:
-                        ac += 1
-                        errd.append((real_tarde - pred, real_tarde))
+                        r["ac"] += 1
+                        r["errd"].append((real_tarde - pred, real_tarde))
                     else:
-                        fa += 1
+                        r["fa"] += 1
                 elif real is not None:
-                    pe += 1
-                else:
-                    cn += 1
+                    r["pe"] += 1
                 if real is not None and pmax is not None:
-                    posib_ok += 1
-                if pmax is not None and real_tarde is None:
-                    posib_fa += 1
-            # eventos: entra al nivel después de ≥ 10 días por debajo; ¿con cuántos días de anticipación avisó?
-            ev = []
-            for t in range(t_ini + 10, t_fin):
+                    r["po"] += 1
+            for t in range(t_ini + 10, t_fin):   # eventos: entra al nivel después de ≥ 10 días por debajo
                 if not np.isnan(a[t]) and a[t] >= L and np.all(np.nan_to_num(a[t - 10:t], nan=-99) < L) and not np.isnan(a[t - 1]):
                     j = 0
                     while j < 15 and aviso[t - 1 - j]:
                         j += 1
-                    ev.append(((d0 + dt.timedelta(days=t)).isoformat(), j))
-            tot_real = ac + pe
-            if tot_real + fa == 0:
-                continue
-            mae = lambda z: f"{np.mean([abs(x) for x, _ in z]):.1f}" if z else "-"
-            sesgo = f"{np.mean([x for x, _ in errd]):+.1f}" if errd else "-"
-            cerca = [x for x in errd if x[1] <= 3]
-            medio = [x for x in errd if 3 < x[1] <= 7]
-            lejos = [x for x in errd if x[1] > 7]
-            ant = [j for _, j in ev]
-            filas_por[niv].append([e["nombre"], len(ev), f"{np.median(ant):.0f} d" if ant else "-",
-                                   sum(1 for j in ant if j == 0), ac, fa, pe,
-                                   f"{100 * ac / max(1, ac + pe):.0f}%", f"{100 * fa / max(1, ac + fa):.0f}%",
-                                   mae(cerca), mae(medio), mae(lejos), sesgo,
-                                   f"{100 * posib_ok / max(1, tot_real):.0f}%"])
-            resumen[niv].append((ac, fa, pe, errd, ant, posib_ok, tot_real))
-            if ev:
-                eventos_txt.append(f"{e['nombre']} {niv.lower()}: " + ", ".join(f"{f} ({j} d)" for f, j in ev[:12]))
-    cab = ["puerto", "eventos", "aviso típico", "sin aviso", "aciertos", "falsas", "perdidas", "detecta", "falsas %",
-           "error 1-3 d", "error 4-7 d", "error 8-15 d", "sesgo", "con 'posible'"]
+                    r["ev"].append(((d0 + dt.timedelta(days=t)).isoformat(), j))
+            if r["ac"] + r["pe"] + r["fa"] + r["sd"]:
+                out[niv].append(r)
+    return out
+
+
+def _total(R):
+    ac = sum(r["ac"] for r in R); fa = sum(r["fa"] for r in R); pe = sum(r["pe"] for r in R); sd = sum(r["sd"] for r in R)
+    errd = [x for r in R for x in r["errd"]]
+    ant = [j for r in R for _, j in r["ev"]]
+    po = sum(r["po"] for r in R)
+    return {"eventos": len(ant), "aviso_med": float(np.median(ant)) if ant else 0, "aviso_3mas": sum(1 for j in ant if j >= 3),
+            "sin_aviso": sum(1 for j in ant if j == 0), "detecta": 100 * ac / max(1, ac + pe), "falsas": 100 * fa / max(1, ac + fa),
+            "posible": 100 * po / max(1, ac + pe), "sin_dato": sd, "sesgo": float(np.mean([x for x, _ in errd])) if errd else 0,
+            "err": {k: float(np.mean([abs(x) for x, real in errd if lo < real <= hi])) if any(lo < real <= hi for _, real in errd) else None
+                    for k, (lo, hi) in {"1-3": (0, 3), "4-7": (3, 7), "8-15": (7, 18)}.items()}}
+
+
+def evaluar_cruces(est, series_largas, desde="2008-01-01", hasta=None, extra=None):
+    """`extra` = {nombre: modelo} para comparar con el modelo en uso (calibrados ANTES de `desde`)."""
+    from . import supa
+    filas_m = supa.select("sige_hidro_modelo", {"select": "*"})
+    calibrado = min((r.get("calibrado") or "9999") for r in filas_m)
+    sube_7d = (filas_m[0].get("sube_7d") or 0.15) if filas_m else 0.15
+    modelos = {f"en uso (calibrado {calibrado}, 3 años)": {r["estacion_id"]: r for r in filas_m}}
+    modelos.update(extra or {})
+    if hasta is None:   # solo días que el modelo en uso no vio al calibrarse (calibra con los 3 años previos)
+        hasta = (dt.date.fromisoformat(calibrado) - dt.timedelta(days=365 * 3 + 20)).isoformat()
+    I = Informe(f"Prueba hacia atrás de los avisos de alerta y evacuación ({desde} a {hasta}, fuera de calibración)")
+    S = series_largas(dt.date.today().year - int(desde[:4]) + 1)
+    d0 = dt.date.fromisoformat(desde) - dt.timedelta(days=30)
+    n = (dt.date.fromisoformat(hasta) - d0).days + 16
+    A = {k: _arr(s, d0, n) for k, s in S.items()}
+    t_ini, t_fin = 30, n - 16
+    I("Cada día se pronostica con lo que se sabía ese día y se compara con lo que pasó en los 15 días siguientes "
+      "(solo días en que el puerto estaba por debajo del nivel). Ningún modelo vio estos años al calibrarse.")
+    I("aviso típico = días seguidos de aviso antes de entrar (mediana de los eventos) · detecta = % de días con cruce real en "
+      "15 días que tuvieron aviso · falsas = % de avisos que no se cumplieron · 'posible' = cruce dentro de la banda de error · "
+      "sin dato = días con cruce real en que no se pudo pronosticar porque faltaba un dato de entrada.")
+    res = {nom: _probar(est, M, A, n, t_ini, t_fin, d0, sube_7d) for nom, M in modelos.items()}
     for niv in ("ALERTA", "EVACUACION"):
-        I("", f"## {niv.capitalize()}")
-        I.tabla(cab, filas_por[niv])
-        R = resumen[niv]
-        if R:
-            ac = sum(r[0] for r in R); fa = sum(r[1] for r in R); pe = sum(r[2] for r in R)
-            errd = [x for r in R for x in r[3]]
-            ant = [j for r in R for j in r[4]]
-            po = sum(r[5] for r in R); tr = sum(r[6] for r in R)
-            por_lead = {}
-            for x, real in errd:
-                por_lead.setdefault(min(15, int(np.ceil(real))), []).append(abs(x))
-            I(f"TOTAL {niv}: {len(ant)} eventos · aviso típico {np.median(ant) if ant else 0:.0f} días antes "
-              f"(25 %: {np.percentile(ant, 25) if ant else 0:.0f} · 75 %: {np.percentile(ant, 75) if ant else 0:.0f}) · "
-              f"{sum(1 for j in ant if j == 0)} sin ningún aviso previo · detecta {100 * ac / max(1, ac + pe):.0f}% de los días con "
-              f"cruce real · falsas {100 * fa / max(1, ac + fa):.0f}% · con 'posible' detecta {100 * po / max(1, tr):.0f}% · "
-              f"sesgo {np.mean([x for x, _ in errd]) if errd else 0:+.2f} días")
-            I("Error medio del día anunciado según cuántos días faltaban de verdad: " +
-              ", ".join(f"{k} d → {np.mean(v):.1f}" for k, v in sorted(por_lead.items())))
+        I("", f"## Comparación de modelos · {niv.lower()}")
+        filas = []
+        for nom in modelos:
+            T = _total(res[nom][niv])
+            fe = lambda k: f"{T['err'][k]:.1f}" if T["err"][k] is not None else "-"
+            filas.append([nom, T["eventos"], f"{T['aviso_med']:.0f} d", T["aviso_3mas"], T["sin_aviso"], f"{T['detecta']:.0f}%",
+                          f"{T['falsas']:.0f}%", f"{T['posible']:.0f}%", T["sin_dato"], fe("1-3"), fe("4-7"), fe("8-15"), f"{T['sesgo']:+.1f}"])
+        I.tabla(["modelo", "eventos", "aviso típico", "avisó ≥3 d", "sin aviso", "detecta", "falsas", "con 'posible'", "sin dato",
+                 "error 1-3 d", "error 4-7 d", "error 8-15 d", "sesgo"], filas)
+    mejor = max(modelos, key=lambda nom: _total(res[nom]["ALERTA"])["detecta"] - 0.5 * _total(res[nom]["ALERTA"])["falsas"])
+    I("", f"## Detalle por puerto · {mejor}")
+    for niv in ("ALERTA", "EVACUACION"):
+        filas = []
+        for r in res[mejor][niv]:
+            ant = [j for _, j in r["ev"]]
+            filas.append([r["puerto"], len(ant), f"{np.median(ant):.0f} d" if ant else "-", sum(1 for j in ant if j == 0),
+                          r["ac"], r["fa"], r["pe"], r["sd"], f"{100 * r['ac'] / max(1, r['ac'] + r['pe']):.0f}%",
+                          f"{100 * r['fa'] / max(1, r['ac'] + r['fa']):.0f}%", f"{100 * r['po'] / max(1, r['ac'] + r['pe']):.0f}%"])
+        I(f"{niv.capitalize()}:", f"### {niv.capitalize()}")
+        I.tabla(["puerto", "eventos", "aviso típico", "sin aviso", "aciertos", "falsas", "perdidas", "sin dato", "detecta", "falsas %",
+                 "con 'posible'"], filas)
     I("", "## Eventos (fecha de entrada y días de aviso continuo antes)")
-    for x in eventos_txt:
-        I("  - " + x)
+    for niv in ("ALERTA", "EVACUACION"):
+        for r in res[mejor][niv]:
+            if r["ev"]:
+                I(f"  - {r['puerto']} {niv.lower()}: " + ", ".join(f"{f} ({j} d)" for f, j in r["ev"][:14]))
     I.guardar()
