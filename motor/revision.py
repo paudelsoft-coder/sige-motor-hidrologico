@@ -246,7 +246,7 @@ def _cambio(a, desde, hasta, tol=4):
     out = np.full(n, np.nan)
     for off in range(tol + 1):
         i1, i2 = np.arange(n) - desde - off, np.arange(n) - hasta - off
-        ok = (i1 >= 0) & (i2 >= 0)
+        ok = (i1 >= 0) & (i2 >= 0) & (i1 < n) & (i2 < n)   # ventanas hacia adelante (lluvia pronosticada)
         v = np.full(n, np.nan)
         v[ok] = a[i1[ok]] - a[i2[ok]]
         m = np.isnan(out) & ~np.isnan(v)
@@ -281,7 +281,7 @@ def _probar(est, modelo, A, n, t_ini, t_fin, d0, sube_7d):
         err = np.array([x if x is not None else np.nan for x in (M.get("err") or [np.nan] * 15)])
         errs = np.array([x if x is not None else np.nan for x in (M.get("err_sube") or M.get("err") or [np.nan] * 15)])
         for L, niv in ((e["alerta"], "ALERTA"), (e["evac"], "EVACUACION")):
-            r = {"puerto": e["nombre"], "ac": 0, "fa": 0, "pe": 0, "sd": 0, "errd": [], "po": 0, "ev": []}
+            r = {"puerto": e["nombre"], "id": e["id"], "orden": e["orden"], "rio": e["rio"], "marea": e.get("marea"), "ac": 0, "fa": 0, "pe": 0, "sd": 0, "errd": [], "po": 0, "ev": []}
             aviso = np.zeros(n, bool)
             for t in range(t_ini, t_fin):
                 h0 = a[t]
@@ -385,3 +385,83 @@ def evaluar_cruces(est, series_largas, desde="2008-01-01", hasta=None, extra=Non
             if r["ev"]:
                 I(f"  - {r['puerto']} {niv.lower()}: " + ", ".join(f"{f} ({j} d)" for f, j in r["ev"][:14]))
     I.guardar()
+
+
+REGIONES = [("Iguazú y Alto Paraná", lambda r: r["orden"] < 7),
+            ("Paraná medio (Ituzaingó–Esquina)", lambda r: 7 <= r["orden"] <= 15.5 and not r["rio"].startswith("Paraguay")),
+            ("Río Paraguay y Bermejo", lambda r: r["rio"].startswith("Paraguay")),
+            ("Paraná inferior (La Paz–Baradero)", lambda r: 15.5 < r["orden"] <= 28.2),
+            ("Delta y Gualeguay", lambda r: 28.2 < r["orden"] < 100),
+            ("Alto Uruguay (El Soberbio–Santo Tomé)", lambda r: 100 <= r["orden"] < 102.5),
+            ("Uruguay medio (Alvear–Mocoretá)", lambda r: 102.5 <= r["orden"] < 106.8),
+            ("Bajo Uruguay (Salto Grande–Gualeguaychú)", lambda r: r["orden"] >= 106.8)]
+
+
+def comparar(est, S, variantes, folds, cal_mod, guardar_mejor=None):
+    """Prueba hacia atrás de varias formas de calibrar el modelo, con validación cruzada por períodos: cada modelo se
+    calibra con unos años y se evalúa en otros que no vio (`folds` = [(hasta_calibración, prueba_desde, prueba_hasta)]).
+    `variantes` = [(nombre, años, extras, máximo de entradas)]. Devuelve {nombre: modelo calibrado hasta el último fold}."""
+    I = Informe("Mejoras del pronóstico: prueba hacia atrás de cada variante (alerta y evacuación)")
+    I("Cada variante se calibra con un período y se prueba en otro que no vio: " +
+      " · ".join(f"calibrado hasta {h} → probado {a} a {b}" for h, a, b in folds) + ". Se suman los dos.")
+    I("aviso típico = días seguidos de aviso antes de entrar (mediana) · detecta = % de días con cruce real en 15 días que "
+      "tuvieron aviso · falsas = % de avisos que no se cumplieron · puntaje = detecta − ½ falsas.")
+    res, modelos = {}, {}
+    for nom, anios, extras, maxe in variantes:
+        cal_mod.MAX_ENTRADAS = maxe
+        R = {"ALERTA": [], "EVACUACION": []}
+        for hasta, t0, t1 in folds:
+            h = hasta.isoformat()
+            Sc = {k: {f: v for f, v in s.items() if f <= h} for k, s in S.items()}
+            M = cal_mod.calibrar(est, Sc, hasta, anios=anios, log=lambda *a: None, extras=extras)
+            modelos[nom] = M
+            d0 = dt.date.fromisoformat(t0) - dt.timedelta(days=30)
+            n = (dt.date.fromisoformat(t1) - d0).days + 16
+            A = {k: _arr(s, d0, n) for k, s in S.items()}
+            out = _probar(est, M, A, n, 30, n - 16, d0, 0.15)
+            for niv in R:
+                R[niv] += out[niv]
+            print(f"comparar: {nom} · hasta {h}: {len(M)} modelos", flush=True)
+        res[nom] = R
+    cab = ["variante", "eventos", "aviso típico", "avisó ≥3 d", "sin aviso", "detecta", "falsas", "con 'posible'",
+           "error 1-3 d", "error 4-7 d", "error 8-15 d", "puntaje"]
+    punt = {}
+    for niv in ("ALERTA", "EVACUACION"):
+        I("", f"## Total · {niv.lower()}")
+        filas = []
+        for nom in res:
+            T = _total(res[nom][niv])
+            fe = lambda k: f"{T['err'][k]:.1f}" if T["err"][k] is not None else "-"
+            p = T["detecta"] - 0.5 * T["falsas"]
+            punt[nom] = punt.get(nom, 0) + p
+            filas.append([nom, T["eventos"], f"{T['aviso_med']:.0f} d", T["aviso_3mas"], T["sin_aviso"], f"{T['detecta']:.0f}%",
+                          f"{T['falsas']:.0f}%", f"{T['posible']:.0f}%", fe("1-3"), fe("4-7"), fe("8-15"), f"{p:.0f}"])
+        I.tabla(cab, filas)
+    for niv in ("ALERTA", "EVACUACION"):
+        I("", f"## Por zona · {niv.lower()} (aviso típico · detecta · falsas)")
+        filas = []
+        for zona, cond in REGIONES:
+            fila = [zona]
+            for nom in res:
+                T = _total([r for r in res[nom][niv] if cond(r)])
+                fila.append(f"{T['aviso_med']:.0f} d · {T['detecta']:.0f}% · {T['falsas']:.0f}%" if T["eventos"] or T["detecta"] else "-")
+            filas.append(fila)
+        I.tabla(["zona"] + list(res), filas)
+    mejor = max(punt, key=punt.get)
+    I("", f"## Mejor variante: {mejor}")
+    for niv in ("ALERTA", "EVACUACION"):
+        filas = []
+        for r in res[mejor][niv]:
+            ant = [j for _, j in r["ev"]]
+            filas.append([r["puerto"], len(ant), f"{np.median(ant):.0f} d" if ant else "-", sum(1 for j in ant if j == 0),
+                          r["ac"], r["fa"], r["pe"], f"{100 * r['ac'] / max(1, r['ac'] + r['pe']):.0f}%",
+                          f"{100 * r['fa'] / max(1, r['ac'] + r['fa']):.0f}%"])
+        I(f"{niv.capitalize()}:", f"### {niv.capitalize()}")
+        I.tabla(["puerto", "eventos", "aviso típico", "sin aviso", "aciertos", "falsas", "perdidas", "detecta", "falsas %"], filas)
+    I("", "### Entradas que eligió cada puerto (mejor variante, último período)")
+    for e in sorted(est, key=lambda x: x["orden"]):
+        M = modelos[mejor].get(str(e["id"]))
+        if M:
+            I(f"  - {e['nombre']}: " + ", ".join(f"{x['nombre']} {x['desde']}/{x['hasta']}" for x in M["entradas"]))
+    I.guardar()
+    return modelos, mejor
