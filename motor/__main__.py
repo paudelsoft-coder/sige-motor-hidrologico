@@ -199,7 +199,10 @@ def salto_grande(desde):
     return len(filas)
 
 
-ANIOS_CAL = 3   # años de historia para calibrar (se decide con `python -m motor evaluar`)
+ANIOS_CAL = 3   # años de historia para calibrar (se decide con `python -m motor mejorar`)
+# Entradas además de las alturas e Itaipú (ver mejoras.py; se decide con `python -m motor mejorar`):
+#   brasil = represas del ONS, ríos de la ANA y Salto Grande · lluvia = lluvia caída por zona · futuro = lluvia pronosticada
+ENTRADAS_CAL = {"brasil": False, "lluvia": False, "futuro": False, "max": 4}
 
 
 def historia():
@@ -359,8 +362,16 @@ def analogos():
 def calibrar():
     from . import supa
     from .calibrar import calibrar as cal, SUBE_7D, ITAIPU_ID
+    from . import calibrar as C, mejoras
     S = _series_largas(ANIOS_CAL) if ANIOS_CAL > 3 else _series_supa(365 * 3 + 10)
-    modelo = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CAL, extras={ITAIPU_ID: "Itaipú (descarga)"})
+    extras = {ITAIPU_ID: "Itaipú (descarga)"}
+    if ENTRADAS_CAL["brasil"] or ENTRADAS_CAL["lluvia"]:
+        S.update(mejoras.entradas((dt.date.today() - dt.timedelta(days=365 * ANIOS_CAL + 40)).isoformat()))
+        for k, m in mejoras.meta().items():
+            if k in S and (ENTRADAS_CAL["lluvia"] if m["tipo"] == "lluvia" else ENTRADAS_CAL["brasil"]):
+                extras[k] = {**m, "futuro": m["tipo"] == "lluvia" and ENTRADAS_CAL["futuro"]}
+    C.MAX_ENTRADAS = ENTRADAS_CAL["max"]
+    modelo = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CAL, extras=extras)
     hoy = dt.date.today().isoformat()
     supa.upsert("sige_hidro_modelo", [{"estacion_id": int(k), "calibrado": hoy, "sube_7d": SUBE_7D, **v} for k, v in modelo.items()], "estacion_id")
     print("calibrar:", len(modelo), "puertos con modelo")
@@ -575,8 +586,11 @@ def mejorar():
     br = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] != "lluvia" and k in S}
     ll = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
     llf = {k: {**m, "futuro": True} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
-    variantes = [("3 años (como hoy)", 3, ita, 4), ("7 años", 7, ita, 4), ("7 años + Brasil y Salto Grande", 7, {**ita, **br}, 6),
-                 ("+ lluvia caída", 7, {**ita, **br, **ll}, 6), ("+ lluvia pronosticada", 7, {**ita, **br, **llf}, 6)]
+    variantes = [("3 años (como hoy)", 3, ita, 4, 0),
+                 ("Brasil+SG", 7, {**ita, **br}, 6, 0), ("Brasil+SG · peso crecida 4", 7, {**ita, **br}, 6, 4),
+                 ("Brasil+SG · peso crecida 10", 7, {**ita, **br}, 6, 10),
+                 ("+lluvia pron.", 7, {**ita, **br, **llf}, 6, 0), ("+lluvia pron. · peso 4", 7, {**ita, **br, **llf}, 6, 4),
+                 ("+lluvia pron. · peso 10", 7, {**ita, **br, **llf}, 6, 10)]
     hoy = dt.date.today() - dt.timedelta(days=20)
     folds = [(dt.date(2018, 12, 31), "2019-01-01", hoy.isoformat()), (hoy, "2011-06-01", "2018-12-31")]
     revision.comparar(est, S, variantes, folds, C)
@@ -603,6 +617,10 @@ def pronostico():
     S = _series_supa(40)
     filas = supa.select("sige_hidro_modelo", {"select": "*"})
     modelo = {str(r["estacion_id"]): r for r in filas}
+    if any(int(en["id"]) > 1000 for r in filas for en in (r.get("entradas") or [])):
+        from . import mejoras   # represas / ríos de Brasil / lluvia caída y pronosticada (16 días)
+        S.update(mejoras.entradas((dt.date.today() - dt.timedelta(days=75)).isoformat(), telemetria_dias=12,
+                                  reciente=True, bajar=False))
     sube = filas[0]["sube_7d"] if filas else 0.15
     pron, cru = _calcular(S, modelo, sube)
     supa.borrar("sige_hidro_pronostico", {"estacion_id": "gte.0"})
