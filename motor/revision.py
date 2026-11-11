@@ -34,13 +34,13 @@ class Informe:
         print("=" * 100 + "\n" + titulo)
 
     def __call__(self, txt="", md=None):
-        print(txt)
+        print(txt, flush=True)
         self.md.append(txt if md is None else md)
 
     def tabla(self, cab, filas):
         print("  ".join(f"{c:>10s}" if i else f"{c:28s}" for i, c in enumerate(cab)))
         for f in filas:
-            print("  ".join(f"{str(c):>10s}" if i else f"{str(c)[:28]:28s}" for i, c in enumerate(f)))
+            print("  ".join(f"{str(c):>10s}" if i else f"{str(c)[:28]:28s}" for i, c in enumerate(f)), flush=True)
         self.md += ["", "| " + " | ".join(cab) + " |", "|" + "---|" * len(cab)]
         self.md += ["| " + " | ".join(str(c) for c in f) + " |" for f in filas]
         self.md.append("")
@@ -49,7 +49,7 @@ class Informe:
         ruta = os.environ.get("GITHUB_STEP_SUMMARY")
         if ruta:
             with open(ruta, "a", encoding="utf-8") as f:
-                f.write("\n".join(self.md)[:900000] + "\n\n")
+                f.write("\n".join(self.md)[:200000] + "\n\n")
 
 
 def _cuenca(e):
@@ -407,8 +407,9 @@ def comparar(est, S, variantes, folds, cal_mod, guardar_mejor=None):
     I("aviso típico = días seguidos de aviso antes de entrar (mediana) · detecta = % de días con cruce real en 15 días que "
       "tuvieron aviso · falsas = % de avisos que no se cumplieron · puntaje = detecta − ½ falsas.")
     res, modelos = {}, {}
-    for nom, anios, extras, maxe in variantes:
+    for nom, anios, extras, maxe, *resto in variantes:
         cal_mod.MAX_ENTRADAS = maxe
+        cal_mod.PESO_CRECIDA = resto[0] if resto else 0.0
         R = {"ALERTA": [], "EVACUACION": []}
         for hasta, t0, t1 in folds:
             h = hasta.isoformat()
