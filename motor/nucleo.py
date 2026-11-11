@@ -275,3 +275,39 @@ def analogos(serie: dict, alerta: float, evac: float, n: int = 10, horizonte: in
                "baja_alerta": dist("baja_alerta"), "baja_evac": dist("baja_evac"),
                "entra_alerta": dist("entra_alerta"), "entra_evac": dist("entra_evac")}
     return {"f": f0, "h": h0, "c7": round(c0, 2)}, resumen, casos
+
+
+def restituir(S: dict, descartadas: dict, estaciones: list, margen: int = 5):
+    """Devuelve a la serie las lecturas altas que el control de calidad descartó pero que un puerto vecino confirma
+    (en el Alto Uruguay y en el Iguazú las crecidas suben tan rápido que parecen picos de un día: 1983, 1992, 2014).
+    Solo lecturas ≥ alerta y por debajo de 1,6 × evacuación (los tipeos tipo 78,91
+    en vez de 7,89 quedan afuera), con un puerto vecino del mismo río
+    también en alerta dentro de ±`margen` días. Modifica S y descartadas; devuelve {id: {fecha: valor}} restituidas."""
+    por = {e["id"]: e for e in estaciones}
+    rio = lambda e: "URUGUAY" if e["rio"].startswith("Uruguay") else "PARAGUAY" if e["rio"].startswith("Paraguay") else "PARANA"
+    p97 = {}
+    def alto(k):
+        if k not in p97:
+            v = sorted(S.get(k, {}).values())
+            p97[k] = v[int(0.97 * (len(v) - 1))] if len(v) > 365 else None
+        return p97[k]
+    vuelven = {}
+    for k, malas in descartadas.items():
+        e = por.get(k)
+        if not e or e.get("alerta") is None or not malas or k not in S:
+            continue
+        vec = sorted((u for u in estaciones if u["id"] != k and not u.get("marea") and abs(u["orden"] - e["orden"]) <= 2.5
+                      and (rio(u) == rio(e) or abs(u["orden"] - e["orden"]) < 1.2)), key=lambda u: abs(u["orden"] - e["orden"]))[:4]
+        for f, v in list(malas.items()):
+            if v < e["alerta"] or v >= (e["evac"] or v) * 1.6:
+                continue
+            for u in vec:
+                su, du = S.get(u["id"]) or {}, descartadas.get(u["id"]) or {}
+                um = u["alerta"] if u.get("alerta") is not None else alto(u["id"])   # el vecino también en alerta
+                val = lambda x: su.get(x) if su.get(x) is not None else du.get(x)   # el vecino también pudo quedar afuera
+                if um is not None and any((val(sumar_dias(f, d)) or -1e9) >= um for d in range(-margen, margen + 1)):
+                    S[k][f] = v
+                    vuelven.setdefault(k, {})[f] = v
+                    del malas[f]
+                    break
+    return vuelven
