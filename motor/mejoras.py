@@ -120,9 +120,10 @@ def _reciente(zonas):
     return {z: {f: sum(v) / len(v) for f, v in d.items()} for z, d in Z.items()}
 
 
-def lluvia_diaria(desde, reciente=False):
+def lluvia_diaria(desde, reciente=False, bajar=True):
     """{id: {fecha: mm}} con ERA5 guardado en sige_hidro_lluvia (baja y guarda lo que falte). Con `reciente`, completa
-    los últimos días y el pronóstico de 16 días con el modelo meteorológico (lo que se usa al pronosticar)."""
+    los últimos días y el pronóstico de 16 días con el modelo meteorológico (lo que se usa al pronosticar).
+    Con bajar=False no pide ERA5 que falte (tarda ~1 minuto por punto): para el pronóstico, que corre seguido."""
     from . import supa
     nombres = {v[0]: k for k, v in ZONAS.items()}
     R = {k: {} for k in ZONAS}
@@ -137,7 +138,7 @@ def lluvia_diaria(desde, reciente=False):
             faltan[nombre] = (desde, pts)
         elif max(s) < hasta:
             faltan[nombre] = ((dt.date.fromisoformat(max(s)) + dt.timedelta(days=1)).isoformat(), pts)
-    for nombre, (d0, pts) in faltan.items():
+    for nombre, (d0, pts) in (faltan.items() if bajar else []):
         nuevo = _era5({nombre: pts}, d0, hasta)[nombre]
         supa.upsert("sige_hidro_lluvia", [{"zona": nombre, "fecha": f, "mm": round(v, 2), "tipo": "era5",
                                            "actualizado": dt.date.today().isoformat()} for f, v in nuevo.items()], "zona,fecha,tipo")
@@ -168,7 +169,7 @@ def acumulada(diaria):
     return out
 
 
-def entradas(desde, telemetria_dias=150, reciente=False):
+def entradas(desde, telemetria_dias=150, reciente=False, bajar=True):
     """Todas las series nuevas {id: {fecha: valor}} listas para usar como entradas del modelo."""
     S = {}
     try:
@@ -180,7 +181,7 @@ def entradas(desde, telemetria_dias=150, reciente=False):
     except Exception as ex:
         print("mejoras: ANA sin datos:", ex)
     try:
-        for k, d in lluvia_diaria(desde, reciente).items():
+        for k, d in lluvia_diaria(desde, reciente, bajar).items():
             S[k] = acumulada(d)
     except Exception as ex:
         print("mejoras: lluvia sin datos:", ex)
