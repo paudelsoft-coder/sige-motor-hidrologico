@@ -140,9 +140,14 @@ def _series_supa(dias):
     for k in list(S):
         limpia, _ = nucleo.depurar(S[k])
         limpia, malas = nucleo.depurar(S[k], nucleo.salto_tipico(limpia))
-        S[k] = {f: v for f, v in limpia.items() if f >= corte}
+        S[k] = limpia
         if malas:
             DESCARTADAS[k] = malas
+    nucleo.restituir(S, DESCARTADAS, estaciones())   # crecidas rápidas confirmadas por un puerto vecino
+    for k in list(S):
+        S[k] = {f: v for f, v in S[k].items() if f >= corte}
+        if not DESCARTADAS.get(k):
+            DESCARTADAS.pop(k, None)
     for r in supa.select("sige_hidro_represas", {"select": "fecha,defluente_m3s", "represa": "eq.ITAIPU", "fecha": f"gte.{desde}"}):
         if r["defluente_m3s"] is not None:
             S.setdefault(ITAIPU_ID, {})[r["fecha"]] = r["defluente_m3s"] / 1000
@@ -239,9 +244,11 @@ def _series_largas(anios):
     S = _historia_supa(dt.date.today().year - anios - 1)
     if not S:   # sin historia cargada: lo de siempre
         return _series_supa(365 * anios + 10)
+    malas = {}
     for k in list(S):
         limpia, _ = nucleo.depurar(S[k])
-        S[k], _ = nucleo.depurar(S[k], nucleo.salto_tipico(limpia))
+        S[k], malas[k] = nucleo.depurar(S[k], nucleo.salto_tipico(limpia))
+    nucleo.restituir(S, malas, estaciones())   # crecidas rápidas confirmadas por un puerto vecino
     desde = (dt.date.today() - dt.timedelta(days=365 * anios + 10)).isoformat()
     for r in supa.select("sige_hidro_represas", {"select": "fecha,defluente_m3s", "represa": "eq.ITAIPU", "fecha": f"gte.{desde}"}):
         if r["defluente_m3s"] is not None:
@@ -657,7 +664,13 @@ if __name__ == "__main__":
         lluvia_cuencas()
     elif tarea == "evaluar_cruces":
         from . import revision
-        revision.evaluar_cruces(estaciones(), _series_largas)
+        from .calibrar import calibrar as cal, ITAIPU_ID
+        corte = dt.date(2007, 12, 31)   # modelos de prueba calibrados antes de los años que se evalúan (2008-2023)
+        S = _series_largas(dt.date.today().year - 1998)
+        Sc = {k: {f: v for f, v in s.items() if f <= corte.isoformat()} for k, s in S.items()}
+        extra = {f"calibrado hasta 2007 con {a} años": cal(estaciones(), Sc, corte, anios=a, log=lambda *x: None,
+                                                          extras={ITAIPU_ID: "Itaipú (descarga)"}) for a in (3, 8)}
+        revision.evaluar_cruces(estaciones(), lambda anios: S, extra=extra)
     elif tarea == "calibrar_glofas":
         calibrar_glofas()
     elif tarea == "prefectura":
