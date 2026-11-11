@@ -20,6 +20,7 @@ Uso:
   python -m motor auditar               revisa la historia de cada puerto (vacíos, imposibles, picos) sin cambiar nada
   python -m motor auditar_borrar        lo mismo y borra las filas sin ningún valor
   python -m motor evaluar_cruces        prueba hacia atrás de los avisos de alerta / evacuación (2008-2023)
+  python -m motor cuencas               lluvia caída / pronosticada, suelo y aporte de cada cuenca (Open-Meteo) → sige_hidro_cuencas
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
 import datetime as dt
@@ -542,6 +543,17 @@ COLUMNAS_CRUCE = ("nivel", "tipo", "umbral", "momento", "desde_rango", "hasta_ra
                   "desde_antes_de_serie", "permanencia_h", "permanencia_minima")
 
 
+def lluvia_cuencas():
+    """Lluvia por cuenca (Open-Meteo) → sige_hidro_cuencas (una fila por cuenca; también corre con todo)."""
+    from . import supa, cuencas as CU
+    filas = CU.calcular()
+    supa.upsert("sige_hidro_cuencas", filas, "cuenca")
+    print(f"cuencas: {len(filas)} cuencas actualizadas")
+    for r in sorted(filas, key=lambda r: -(r["pron_7d"] or 0))[:12]:
+        print(f"  {r['nombre'][:40]:40s} llovió 7d {r['lluvia_7d']:6.1f} mm · pronóstico 7d {r['pron_7d']:6.1f} mm · "
+              f"suelo {r['suelo']} · aporte {r['aporte_7d_m3s']} → {r['aporte_pron7d_m3s']} m³/s")
+
+
 def _calcular(S, modelo, sube_7d):
     emitido = dt.datetime.now(nucleo.ART).isoformat(timespec="minutes")
     pron, cru = [], []
@@ -641,6 +653,8 @@ if __name__ == "__main__":
     elif tarea in ("auditar", "auditar_borrar"):
         from . import revision
         revision.auditar(estaciones(), borrar=tarea == "auditar_borrar")
+    elif tarea == "cuencas":
+        lluvia_cuencas()
     elif tarea == "evaluar_cruces":
         from . import revision
         revision.evaluar_cruces(estaciones(), _series_largas)
@@ -699,3 +713,7 @@ if __name__ == "__main__":
             uruguay()
         except Exception as ex:
             print("uruguay: sin actualizar:", ex)
+        try:
+            lluvia_cuencas()
+        except Exception as ex:   # si la tabla todavía no existe o Open-Meteo no responde, lo demás ya quedó
+            print("cuencas: sin actualizar:", ex)
