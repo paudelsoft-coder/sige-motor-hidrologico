@@ -21,6 +21,7 @@ Uso:
   python -m motor auditar_borrar        lo mismo y borra las filas sin ningún valor
   python -m motor evaluar_cruces        prueba hacia atrás de los avisos de alerta / evacuación (2008-2023)
   python -m motor mejorar               compara variantes del modelo (Brasil, Salto Grande, lluvia) con prueba hacia atrás
+  python -m motor prono_ina             guarda el pronóstico oficial del INA del día → sige_hidro_prono_ina
   python -m motor cuencas               lluvia caída / pronosticada, suelo y aporte de cada cuenca (Open-Meteo) → sige_hidro_cuencas
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
@@ -596,6 +597,14 @@ def mejorar():
     revision.comparar(est, S, variantes, folds, C)
 
 
+def prono_ina():
+    """Pronóstico oficial del INA del día → sige_hidro_prono_ina (para compararlo con el nuestro)."""
+    from . import ina_prono, supa
+    filas = ina_prono.bajar(estaciones())
+    supa.upsert("sige_hidro_prono_ina", filas, "estacion_id,modelo,emitido,fecha,nivel")
+    print(f"prono_ina: {len(filas)} valores de {len({f['estacion_id'] for f in filas})} puertos")
+
+
 def _calcular(S, modelo, sube_7d):
     emitido = dt.datetime.now(nucleo.ART).isoformat(timespec="minutes")
     pron, cru = [], []
@@ -625,6 +634,13 @@ def pronostico():
     pron, cru = _calcular(S, modelo, sube)
     supa.borrar("sige_hidro_pronostico", {"estacion_id": "gte.0"})
     supa.insertar("sige_hidro_pronostico", pron)
+    try:   # archivo para comparar con el INA y con lo que pasó (uno por puerto, día del dato y horizonte)
+        version = "v2" if any(int(en["id"]) > 1000 for r in filas for en in (r.get("entradas") or [])) else "v1"
+        supa.upsert("sige_hidro_pron_archivo", [{"estacion_id": q["estacion_id"], "dato_fecha": q["dato_fecha"], "k": q["k"],
+                                                 "fecha": q["fecha"], "central": q["central"], "min": q["min"], "max": q["max"],
+                                                 "version": version} for q in pron], "estacion_id,dato_fecha,k")
+    except Exception as ex:
+        print("pronostico: archivo sin guardar:", ex)
     supa.borrar("sige_hidro_cruces", {"estacion_id": "gte.0"})
     supa.insertar("sige_hidro_cruces", cru)
     recientes = [f"{k} {f}={v}" for k, m in DESCARTADAS.items() for f, v in m.items()
@@ -701,6 +717,8 @@ if __name__ == "__main__":
         revision.auditar(estaciones(), borrar=tarea == "auditar_borrar")
     elif tarea == "mejorar":
         mejorar()
+    elif tarea == "prono_ina":
+        prono_ina()
     elif tarea == "cuencas":
         lluvia_cuencas()
     elif tarea == "evaluar_cruces":
@@ -767,6 +785,10 @@ if __name__ == "__main__":
             uruguay()
         except Exception as ex:
             print("uruguay: sin actualizar:", ex)
+        try:
+            prono_ina()
+        except Exception as ex:
+            print("prono_ina: sin actualizar:", ex)
         try:
             lluvia_cuencas()
         except Exception as ex:   # si la tabla todavía no existe o Open-Meteo no responde, lo demás ya quedó
