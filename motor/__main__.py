@@ -20,6 +20,7 @@ Uso:
   python -m motor auditar               revisa la historia de cada puerto (vacíos, imposibles, picos) sin cambiar nada
   python -m motor auditar_borrar        lo mismo y borra las filas sin ningún valor
   python -m motor evaluar_cruces        prueba hacia atrás de los avisos de alerta / evacuación (2008-2023)
+  python -m motor mejorar               compara variantes del modelo (Brasil, Salto Grande, lluvia) con prueba hacia atrás
   python -m motor cuencas               lluvia caída / pronosticada, suelo y aporte de cada cuenca (Open-Meteo) → sige_hidro_cuencas
   python -m motor prueba                calcula con los archivos de pruebas/ sin conectarse a nada
 """
@@ -561,6 +562,26 @@ def lluvia_cuencas():
               f"suelo {r['suelo']} · aporte {r['aporte_7d_m3s']} → {r['aporte_pron7d_m3s']} m³/s")
 
 
+def mejorar():
+    """Compara formas de pronosticar (años de calibración, represas y ríos de Brasil, Salto Grande, lluvia caída y
+    pronosticada) con una prueba hacia atrás de los avisos de alerta / evacuación. No cambia el pronóstico del portal."""
+    from . import revision, mejoras, calibrar as C
+    est = estaciones()
+    S = _series_largas(dt.date.today().year - 2009)
+    S.update(mejoras.entradas("2009-01-01"))
+    M = mejoras.meta()
+    print("mejorar: entradas nuevas " + ", ".join(f"{M[k]['nombre']} {len(S[k])} d" for k in M if k in S), flush=True)
+    ita = {C.ITAIPU_ID: "Itaipú (descarga)"}
+    br = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] != "lluvia" and k in S}
+    ll = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
+    llf = {k: {**m, "futuro": True} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
+    variantes = [("3 años (como hoy)", 3, ita, 4), ("7 años", 7, ita, 4), ("7 años + Brasil y Salto Grande", 7, {**ita, **br}, 6),
+                 ("+ lluvia caída", 7, {**ita, **br, **ll}, 6), ("+ lluvia pronosticada", 7, {**ita, **br, **llf}, 6)]
+    hoy = dt.date.today() - dt.timedelta(days=20)
+    folds = [(dt.date(2018, 12, 31), "2019-01-01", hoy.isoformat()), (hoy, "2011-06-01", "2018-12-31")]
+    revision.comparar(est, S, variantes, folds, C)
+
+
 def _calcular(S, modelo, sube_7d):
     emitido = dt.datetime.now(nucleo.ART).isoformat(timespec="minutes")
     pron, cru = [], []
@@ -660,6 +681,8 @@ if __name__ == "__main__":
     elif tarea in ("auditar", "auditar_borrar"):
         from . import revision
         revision.auditar(estaciones(), borrar=tarea == "auditar_borrar")
+    elif tarea == "mejorar":
+        mejorar()
     elif tarea == "cuencas":
         lluvia_cuencas()
     elif tarea == "evaluar_cruces":
