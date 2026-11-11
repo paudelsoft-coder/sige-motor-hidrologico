@@ -19,6 +19,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import om
+
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URL = "https://api.open-meteo.com/v1/forecast"
 LOTE = 50
@@ -32,7 +34,7 @@ def cuencas():
 def _get(url, intentos=5):
     for i in range(intentos):
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "sige-motor"}), timeout=120) as r:
+            with urllib.request.urlopen(urllib.request.Request(om.firmar(url), headers={"User-Agent": "sige-motor"}), timeout=120) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as ex:
             if ex.code in (429, 502, 503) and i < intentos - 1:
