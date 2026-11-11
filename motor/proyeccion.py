@@ -14,6 +14,8 @@ import datetime as dt
 from .base import UNA_HORA, medianoche, mover
 
 H = 15
+EXTERNAS = 1000     # ids ≥ 1000: Itaipú, represas, ríos de Brasil, lluvia (no son puertos)
+MAX_FALTAN = 2      # series vecinas sin dato reciente que se toleran (se toman como "sin cambio")
 
 
 def diferencia(serie, t, desde, hasta, tolerancia=3):
@@ -46,12 +48,19 @@ def proyectar(series, modelo, est_id, sube_7d=0.15):
         return None
     t = max(s)
     h0 = s[t]
-    x = []
+    x, faltan = [], set()
     for en in M["entradas"]:
-        v = diferencia(series.get(int(en["id"])), t, en["desde"], en["hasta"])
+        k = int(en["id"])
+        # represas, ríos de Brasil y lluvia se publican con días de atraso: se acepta el dato de hasta una semana antes
+        v = diferencia(series.get(k), t, en["desde"], en["hasta"], tolerancia=7 if k >= EXTERNAS else 3)
         if v is None:
-            return None
+            if k == est_id:
+                return None          # sin datos propios recientes no hay pronóstico
+            faltan.add(k)
+            v = 0.0                  # la serie vecina sin dato reciente se toma como "sin cambio"
         x.append(v)
+    if len(faltan) > MAX_FALTAN:
+        return None
     h7 = s.get(mover(t, -7))
     sube = h7 is not None and h0 - h7 > sube_7d and bool(M.get("err_sube"))
     bandas = M["err_sube"] if sube else M.get("err")
