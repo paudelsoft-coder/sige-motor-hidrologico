@@ -31,11 +31,18 @@ def es_sige2(M):
     return bool(M and M.get("w") and len(M["w"][0]) == len(M["entradas"]) + 1)
 
 
+def es_lineal_simple(M):
+    """Formato de transición (modelos calibrados antes de noviembre de 2026): w[k] = [c1 … cn] sin término fijo y
+    banda simétrica err[k] = error típico. Se usa solo mientras un puerto no tenga modelo sige2."""
+    return bool(M and M.get("w") and M.get("entradas") and len(M["w"][0]) == len(M["entradas"]))
+
+
 def proyectar(series, modelo, est_id, sube_7d=0.15):
     """[{k, fecha, central, min, max, sube}] para el puerto, o None si no hay modelo o falta un dato de entrada."""
     M = modelo.get(str(est_id)) or modelo.get(est_id)
     s = series.get(est_id)
-    if not es_sige2(M) or not s:
+    simple = not es_sige2(M) and es_lineal_simple(M)
+    if not (es_sige2(M) or simple) or not s:
         return None
     t = max(s)
     h0 = s[t]
@@ -49,9 +56,14 @@ def proyectar(series, modelo, est_id, sube_7d=0.15):
     sube = h7 is not None and h0 - h7 > sube_7d and bool(M.get("err_sube"))
     bandas = M["err_sube"] if sube else M.get("err")
     out = []
-    for k, (b0, *c) in enumerate(M["w"], start=1):
+    for k, fila in enumerate(M["w"], start=1):
+        b0, c = (0.0, fila) if simple else (fila[0], fila[1:])
         central = h0 + b0 + sum(ci * xi for ci, xi in zip(c, x))
-        q = bandas[k - 1] if bandas and bandas[k - 1] else None
+        q = bandas[k - 1] if bandas and k <= len(bandas) and bandas[k - 1] is not None else None
+        if simple and q is None and M.get("err") and k <= len(M["err"]):
+            q = M["err"][k - 1]
+        if simple and q is not None:
+            q = (-q, q)
         out.append({"k": k, "fecha": mover(t, k), "central": round(central, 2),
                     "min": round(central + q[0], 2) if q else None, "max": round(central + q[1], 2) if q else None,
                     "sube": sube})
