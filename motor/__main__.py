@@ -577,7 +577,7 @@ def lluvia_cuencas():
 def mejorar():
     """Compara formas de pronosticar (años de calibración, represas y ríos de Brasil, Salto Grande, lluvia caída y
     pronosticada) con una prueba hacia atrás de los avisos de alerta / evacuación. No cambia el pronóstico del portal."""
-    from . import revision, mejoras, calibrar as C
+    from . import revision, mejoras, calibrar as C, modelo as MO
     est = estaciones()
     S = _series_largas(dt.date.today().year - 2009)
     S.update(mejoras.entradas("2009-01-01"))
@@ -587,11 +587,11 @@ def mejorar():
     br = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] != "lluvia" and k in S}
     ll = {k: {**m, "futuro": False} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
     llf = {k: {**m, "futuro": True} for k, m in M.items() if m["tipo"] == "lluvia" and k in S}
-    variantes = [("3 años (como hoy)", 3, ita, 4, 0),
-                 ("Brasil+SG", 7, {**ita, **br}, 6, 0), ("Brasil+SG · peso crecida 4", 7, {**ita, **br}, 6, 4),
-                 ("Brasil+SG · peso crecida 10", 7, {**ita, **br}, 6, 10),
-                 ("+lluvia pron.", 7, {**ita, **br, **llf}, 6, 0), ("+lluvia pron. · peso 4", 7, {**ita, **br, **llf}, 6, 4),
-                 ("+lluvia pron. · peso 10", 7, {**ita, **br, **llf}, 6, 10)]
+    variantes = [("hoy: modelo anterior, 3 años", 3, ita, 4, 0),
+                 ("anterior + Brasil y lluvia pron.", 7, {**ita, **br, **llf}, 6, 0),
+                 ("NUEVO + Brasil y SG", 7, {**ita, **br}, 12, 0, MO),
+                 ("NUEVO + Brasil y lluvia pron.", 7, {**ita, **br, **llf}, 12, 0, MO),
+                 ("NUEVO + Brasil y lluvia pron. · peso 4", 7, {**ita, **br, **llf}, 12, 4, MO)]
     hoy = dt.date.today() - dt.timedelta(days=20)
     folds = [(dt.date(2018, 12, 31), "2019-01-01", hoy.isoformat()), (hoy, "2011-06-01", "2018-12-31")]
     revision.comparar(est, S, variantes, folds, C)
