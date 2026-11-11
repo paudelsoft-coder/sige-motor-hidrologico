@@ -13,7 +13,8 @@ import os
 
 import numpy as np
 
-from . import nucleo
+from . import calidad
+from .base import mover
 
 # Crecidas extraordinarias conocidas (año del pico) para reconocer picos reales en la historia.
 CRECIDAS = {
@@ -94,7 +95,7 @@ def _confirma(f, serie_vec, umbral, margen=20):
     """¿El puerto vecino también estuvo alto (≥ su percentil 97) dentro de ±`margen` días?"""
     if not serie_vec or umbral is None:
         return None
-    hay = [serie_vec.get(nucleo.sumar_dias(f, k)) for k in range(-margen, margen + 1)]
+    hay = [serie_vec.get(mover(f, k)) for k in range(-margen, margen + 1)]
     hay = [x for x in hay if x is not None]
     if not hay:
         return None
@@ -134,9 +135,8 @@ def auditar(est, borrar=False):
     # --- limpieza por puerto
     limpia, desc = {}, {}
     for k, s in S.items():
-        l0, _ = nucleo.depurar(s)
-        limpia[k], desc[k] = nucleo.depurar(s, nucleo.salto_tipico(l0))
-    vuelven = nucleo.restituir(limpia, desc, est)
+        limpia[k], desc[k] = calidad.limpiar_dos_pasos(s)
+    vuelven = calidad.restituir(limpia, desc, est)
     I(f"Crecidas rápidas que la limpieza descartaba y ahora se devuelven (un puerto vecino las confirma): "
       f"{sum(len(v) for v in vuelven.values())} lecturas en {len(vuelven)} puertos.")
     filas, perdidas = [], []
