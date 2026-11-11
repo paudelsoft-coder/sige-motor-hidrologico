@@ -11,12 +11,14 @@ on:
         default: "todo"
 
 concurrency:
-  group: motor
+  # las pruebas largas (mejorar, evaluar…) van en otra fila para no frenar el pronóstico de todos los días
+  group: ${{ contains(fromJSON('["mejorar","evaluar_cruces","auditar","auditar_borrar","evaluar","evaluar_uruguay","evaluar_prueba"]'), github.event.inputs.tarea) && 'motor-prueba' || 'motor-v2' }}
   cancel-in-progress: false
 
 jobs:
   motor:
     runs-on: ubuntu-latest
+    timeout-minutes: 150   # si algo se cuelga, GitHub lo corta y no frena las corridas siguientes
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
