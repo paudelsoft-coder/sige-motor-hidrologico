@@ -275,11 +275,17 @@ def _probar(est, modelo, A, n, t_ini, t_fin, d0, sube_7d):
             u = A.get(int(en["id"]))
             X.append(_cambio(u, en["desde"], en["hasta"]) if u is not None else np.full(n, np.nan))
         X = np.array(X)
-        P = a[None, :] + np.array(M["w"]) @ X            # 15 × n : central para k = 1..15
+        if len(M["w"][0]) == len(M["entradas"]) + 1:     # modelo propio (sige2): b0 + coeficientes, banda por cuantiles
+            Wm = np.array(M["w"])
+            P = a[None, :] + Wm[:, :1] + Wm[:, 1:] @ X
+            alto = lambda clave: np.array([q[1] if q else np.nan for q in (M.get(clave) or M.get("err") or [None] * 15)])
+            err, errs = alto("err"), alto("err_sube")
+        else:                                              # modelo anterior: pesos sobre las diferencias, banda ± RMSE
+            P = a[None, :] + np.array(M["w"]) @ X
+            err = np.array([x if x is not None else np.nan for x in (M.get("err") or [np.nan] * 15)])
+            errs = np.array([x if x is not None else np.nan for x in (M.get("err_sube") or M.get("err") or [np.nan] * 15)])
         h7 = np.concatenate([np.full(7, np.nan), a[:-7]])
         sube = (a - h7) > sube_7d
-        err = np.array([x if x is not None else np.nan for x in (M.get("err") or [np.nan] * 15)])
-        errs = np.array([x if x is not None else np.nan for x in (M.get("err_sube") or M.get("err") or [np.nan] * 15)])
         for L, niv in ((e["alerta"], "ALERTA"), (e["evac"], "EVACUACION")):
             r = {"puerto": e["nombre"], "id": e["id"], "orden": e["orden"], "rio": e["rio"], "marea": e.get("marea"), "ac": 0, "fa": 0, "pe": 0, "sd": 0, "errd": [], "po": 0, "ev": []}
             aviso = np.zeros(n, bool)
@@ -408,13 +414,14 @@ def comparar(est, S, variantes, folds, cal_mod, guardar_mejor=None):
       "tuvieron aviso · falsas = % de avisos que no se cumplieron · puntaje = detecta − ½ falsas.")
     res, modelos = {}, {}
     for nom, anios, extras, maxe, *resto in variantes:
-        cal_mod.MAX_ENTRADAS = maxe
-        cal_mod.PESO_CRECIDA = resto[0] if resto else 0.0
+        cm = resto[1] if len(resto) > 1 else cal_mod   # cada variante puede usar otro calibrador (modelo nuevo)
+        cm.MAX_ENTRADAS = maxe
+        cm.PESO_CRECIDA = resto[0] if resto else 0.0
         R = {"ALERTA": [], "EVACUACION": []}
         for hasta, t0, t1 in folds:
             h = hasta.isoformat()
             Sc = {k: {f: v for f, v in s.items() if f <= h} for k, s in S.items()}
-            M = cal_mod.calibrar(est, Sc, hasta, anios=anios, log=lambda *a: None, extras=extras)
+            M = cm.calibrar(est, Sc, hasta, anios=anios, log=lambda *a: None, extras=extras)
             modelos[nom] = M
             d0 = dt.date.fromisoformat(t0) - dt.timedelta(days=30)
             n = (dt.date.fromisoformat(t1) - d0).days + 16
