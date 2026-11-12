@@ -673,7 +673,7 @@ def transito():
     from . import supa
     from . import transito as T
     import numpy as np
-    rep = supa.select("sige_hidro_represas", {"select": "*", "order": "fecha"})
+    rep = supa.select("sige_hidro_represas", {"select": "*", "order": "fecha", "represa": "not.like.ANA_*"})
     if len(rep) < 120:
         print(f"transito: hay {len(rep)} días de represas; hacen falta al menos 120 para calibrar")
         return
