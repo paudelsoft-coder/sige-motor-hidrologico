@@ -24,9 +24,17 @@ ESTACIONES = {
 }
 
 
+LIMITE = None   # time.monotonic() a partir del cual no se pide nada más a la ANA en esta corrida (None = sin límite)
+
+
 def _get(metodo, params, timeout=90, intentos=3):
     url = URL + metodo + "?" + urllib.parse.urlencode(params)
     for i in range(intentos):
+        if LIMITE is not None:
+            resto = LIMITE - time.monotonic()
+            if resto <= 0:
+                raise TimeoutError("se terminó el tiempo para la ANA en esta corrida")
+            timeout = min(timeout, max(5.0, resto))
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout) as r:
                 return ET.fromstring(r.read())
