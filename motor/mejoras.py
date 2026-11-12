@@ -61,26 +61,53 @@ def _represas(desde):
     return out
 
 
-def _ana(desde, telemetria_dias):
-    from . import ana
+def _ana(desde, telemetria_dias, bajar=True):
+    """Caudales de la ANA {id: {fecha: miles de m³/s}}. Lo ya bajado queda guardado en sige_hidro_represas (represa =
+    "ANA_<código>"), así cada corrida pide a la ANA solo los días nuevos. Sin `bajar` (pronóstico, cada hora) no pide la
+    serie histórica y le da a la ANA como mucho 90 segundos en total: si el servicio está lento, se usa lo guardado."""
+    from . import ana, supa
     hasta = dt.date.today().isoformat()
+    guardado = {}
+    try:
+        for r in supa.select("sige_hidro_represas", {"select": "represa,fecha,defluente_m3s", "represa": "like.ANA_*",
+                                                     "fecha": f"gte.{desde}"}):
+            if r["defluente_m3s"] is not None:
+                guardado.setdefault(r["represa"][4:], {})[r["fecha"]] = float(r["defluente_m3s"])
+    except Exception as ex:
+        print("mejoras: ANA guardada sin leer:", str(ex)[:80])
+    ana.LIMITE = None if bajar else time.monotonic() + 90
     out = {}
-    for k, (cod, _, nombre) in ANA.items():
-        try:
-            s = ana.historica(cod, desde, hasta)
-        except Exception as ex:
-            print(f"mejoras: {nombre} histórica sin datos ({str(ex)[:80]})")
-            s = {}
-        if telemetria_dias:
-            ini = max(dt.date.fromisoformat(max(s)) + dt.timedelta(days=1) if s else dt.date.fromisoformat(desde),
-                      dt.date.today() - dt.timedelta(days=telemetria_dias))
-            if ini.isoformat() <= hasta:
+    try:
+        for k, (cod, _, nombre) in ANA.items():
+            s, nuevos = dict(guardado.get(cod, {})), {}
+            if bajar:
                 try:
-                    s.update(ana.telemetria(cod, ini.isoformat(), hasta))
+                    h = ana.historica(cod, desde, hasta)
+                    nuevos.update({f: v for f, v in h.items() if f not in s})
+                    s = {**h, **s}
+                except Exception as ex:
+                    print(f"mejoras: {nombre} histórica sin datos ({str(ex)[:80]})")
+            if telemetria_dias:
+                ini = max(dt.date.fromisoformat(max(s)) if s else dt.date.fromisoformat(desde),
+                          dt.date.today() - dt.timedelta(days=telemetria_dias))
+                try:
+                    tel = ana.telemetria(cod, ini.isoformat(), hasta)
+                    nuevos.update(tel)
+                    s.update(tel)
                 except Exception as ex:
                     print(f"mejoras: {nombre} telemetría sin datos ({str(ex)[:80]})")
-        out[k] = {f: v / 1000 for f, v in s.items() if v is not None and 0 < v < 60000}
-        print(f"mejoras: {nombre} {len(out[k])} días" + (f", último {max(out[k])}" if out[k] else ""))
+            filas = [{"represa": "ANA_" + cod, "fecha": f, "defluente_m3s": round(v, 1), "fuente": "ANA (HidroWeb)"}
+                     for f, v in sorted(nuevos.items()) if v is not None and 0 < v < 60000]
+            if filas:
+                try:
+                    supa.upsert("sige_hidro_represas", filas, "represa,fecha")
+                except Exception as ex:
+                    print(f"mejoras: {nombre} sin guardar ({str(ex)[:80]})")
+            out[k] = {f: v / 1000 for f, v in s.items() if v is not None and 0 < v < 60000}
+            print(f"mejoras: {nombre} {len(out[k])} días" + (f", último {max(out[k])}" if out[k] else "")
+                  + (f" ({len(filas)} nuevos)" if filas else ""))
+    finally:
+        ana.LIMITE = None
     return out
 
 
@@ -177,7 +204,7 @@ def entradas(desde, telemetria_dias=150, reciente=False, bajar=True):
     except Exception as ex:
         print("mejoras: represas sin datos:", ex)
     try:
-        S.update(_ana(desde, telemetria_dias))
+        S.update(_ana(desde, telemetria_dias, bajar))
     except Exception as ex:
         print("mejoras: ANA sin datos:", ex)
     try:
