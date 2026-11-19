@@ -53,6 +53,11 @@ def cuencas():
     return json.load(open(os.path.join(RAIZ, "datos", "cuencas.json"), encoding="utf-8"))["cuencas"]
 
 
+def regiones_gr4j():
+    p = os.path.join(RAIZ, "datos", "gr4j_regiones.json")
+    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else {"regiones": {}, "asignacion": {}}
+
+
 def cuencas_salado():
     p = os.path.join(RAIZ, "datos", "cuencas_salado.json")
     return json.load(open(p, encoding="utf-8"))["cuencas"] if os.path.exists(p) else []
@@ -156,7 +161,7 @@ def _fila(c, mios, hoy, ext):
         "aporte_pron7d_m3s": round(_aporte(dias(fut[:7]), c["area_km2"])) if hay_puerto else None,
         "aporte_real_m3s": round(_aporte(dias(pas[-ventana:]), c["area_km2"])) if hay_puerto else None,
         "ventana_dias": ventana, "viaje_min": c.get("viaje_min"), "viaje_max": c.get("viaje_max"),
-        "puntos": len(c["puntos"]),
+        "puntos": len(c["puntos"]), "metodo": "coeficiente fijo (sin calibrar)",
         "serie": [dict({"f": f, "mm": round(mm, 1) if mm is not None else None, "s": sat(th)},
                        **({"ss": sat(ts), "sp": sat(tp)} if ext else {}))
                   for f, mm, th, ts, tp in serie],
@@ -168,6 +173,7 @@ def _fila(c, mios, hoy, ext):
 def calcular(hoy=None):
     hoy = hoy or dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).date().isoformat()
     filas = []
+    gr = regiones_gr4j()
     try:
         filas += salado(hoy)
     except Exception as ex:   # el Salado es un agregado: si falla, las demás cuencas se guardan igual
@@ -177,7 +183,8 @@ def calcular(hoy=None):
             continue
         puntos = [tuple(p) for c in grupo for p in c["puntos"]]
         try:
-            datos = _bajar(puntos, pasados=30, capas=CAPAS_EXT) if ext else _bajar(puntos)
+            datos = (_bajar(puntos, pasados=PASADOS_GR4J, capas=CAPAS_EXT, temperaturas=True) if ext
+                     else _bajar(puntos, pasados=PASADOS_GR4J, temperaturas=True))
         except Exception as ex:
             if not ext:
                 raise
@@ -188,7 +195,12 @@ def calcular(hoy=None):
         for c in grupo:
             mios = datos[j:j + len(c["puntos"])]
             j += len(c["puntos"])
-            filas.append(_fila(c, mios, hoy, ext))
+            fila = _fila(c, mios, hoy, ext)
+            try:
+                _gr4j_fila(fila, c, mios, hoy, gr)
+            except Exception as ex:   # si algo falla queda el coeficiente fijo para esa cuenca
+                print(f"cuencas: {c['id']} sin GR4J ({str(ex)[:80]})")
+            filas.append(fila)
     return filas
 
 
@@ -241,6 +253,7 @@ def salado(hoy):
         fila["aporte_7d_m3s"] = round(sum(pas[-7:]) / max(1, len(pas[-7:]))) if pas else None
         fila["aporte_pron7d_m3s"] = round(sum(fut[:7]) / max(1, len(fut[:7]))) if fut else None
         fila["ventana_dias"] = 7
+        fila["metodo"] = "GR4J calibrado · río Salado (caudal de Recreo, KGE 0.74)"
         por_fecha = {f: (round(a, 1), round(b, 1), round(s, 2)) for f, a, b, s in zip(fechas, q, qr, llenado)}
         for it in fila["serie"]:
             if it["f"] in por_fecha:
@@ -260,7 +273,52 @@ def salado(hoy):
         "aporte_7d_m3s": round(sum(pas[-7:]) / max(1, len(pas[-7:]))) if pas else None,
         "aporte_pron7d_m3s": round(sum(fut[:7]) / max(1, len(fut[:7]))) if fut else None,
         "aporte_real_m3s": round(pas[-1]) if pas else None, "ventana_dias": 7, "viaje_min": None, "viaje_max": None,
-        "puntos": 0, "serie": [{"f": f, "qr": round(llega[f], 1)} for f in fechas[-46:]],
+        "puntos": 0, "metodo": "GR4J calibrado · río Salado (caudal de Recreo, KGE 0.74)",
+        "serie": [{"f": f, "qr": round(llega[f], 1)} for f in fechas[-46:]],
         "actualizado": dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes")})
     return filas
+
+
+# ------------------------------------------------- aporte con GR4J regionalizado (todas las cuencas salvo el Salado)
+PASADOS_GR4J = 45   # días de lluvia pasada para "calentar" el modelo (ver la prueba en datos/gr4j_regiones.json)
+
+
+def _gr4j_fila(fila, c, mios, hoy, gr):
+    """Reemplaza el aporte del coeficiente fijo por el de GR4J con los parámetros de la región de la cuenca
+    (datos/gr4j_regiones.json): calibrados contra caudales medidos o transferidos de la región más parecida."""
+    from . import escorrentia as ES
+    a = (gr.get("asignacion") or {}).get(c["id"])
+    if isinstance(a, list):          # [región, "calibrado" | "transferido"]
+        a = {"region": a[0], "estado": a[1]}
+    R = (gr.get("regiones") or {}).get(a["region"]) if a else None
+    if not R:
+        fila["metodo"] = "coeficiente fijo (sin calibrar)"
+        return
+    fechas = sorted({f for d in mios for f in d})
+    if not fechas:
+        return
+    fac = R.get("factor_lluvia", 1.0)
+    lat = sum(p[0] for p in c["puntos"]) / len(c["puntos"])
+    P = [(_media([d[f][0] for d in mios if f in d]) or 0.0) * fac for f in fechas]
+    E = []
+    for f in fechas:
+        tx = _media([d[f][2][0] for d in mios if f in d and len(d[f]) > 2])
+        tn = _media([d[f][2][1] for d in mios if f in d and len(d[f]) > 2])
+        e = ES.hargreaves(tx, tn, lat, dt.date.fromisoformat(f).timetuple().tm_yday)
+        E.append(e if e is not None else (E[-1] if E else 3.0))
+    s0 = R["s0_mes"][dt.date.fromisoformat(fechas[0]).month - 1]
+    Q, llenado = ES.gr4j(P, E, R["x1"], R["x2"], R["x3"], R["x4"], s0=s0)
+    q = [x * c["area_km2"] / 86.4 for x in Q]
+    i_hoy = sum(1 for f in fechas if f < hoy)
+    pas, fut = q[:i_hoy], q[i_hoy:]
+    ventana = int(c.get("ventana_dias") or 7)
+    if fila.get("puerto_id") or c.get("puerto_id"):
+        fila["aporte_real_m3s"] = round(sum(pas[-ventana:]) / max(1, len(pas[-ventana:]))) if pas else None
+        fila["aporte_7d_m3s"] = round(sum(pas[-7:]) / max(1, len(pas[-7:]))) if pas else None
+        fila["aporte_pron7d_m3s"] = round(sum(fut[:7]) / max(1, len(fut[:7]))) if fut else None
+    por = {f: (round(x, 1), round(s, 2)) for f, x, s in zip(fechas, q, llenado)}
+    for it in fila["serie"]:
+        if it["f"] in por:
+            it["q"], it["gr"] = por[it["f"]]
+    fila["metodo"] = f"GR4J {a['estado']} · región {a['region']} (KGE {R.get('kge_val')})"
 
