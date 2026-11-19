@@ -56,6 +56,11 @@ def _prefectura(fallos):
     try:
         ahora = dt.datetime.now(dt.timezone.utc).isoformat()
         supa.upsert("sige_hidro_ultima", [{**l, "fuente": "PNA", "actualizado": ahora} for l in ult.values()], "estacion_id")
+        try:   # historia de lecturas intradiarias: para medir después la hora real de cada cruce
+            supa.upsert("sige_hidro_lecturas", [{"estacion_id": l["estacion_id"], "fecha": l["fecha"], "hora": l["hora"],
+                                                 "altura_m": l["altura_m"]} for l in lec if l.get("hora")], "estacion_id,fecha,hora")
+        except Exception as ex:
+            print("prefectura: historia intradiaria sin guardar:", str(ex)[:120])
     except Exception as ex:
         print("prefectura: no se pudo guardar la última lectura (¿falta la tabla sige_hidro_ultima?):", str(ex)[:120])
     print(f"prefectura: {len(lec)} lecturas de {len(ult)} puertos")
@@ -202,7 +207,8 @@ ANIOS_CAL = 7   # años de historia para calibrar (elegido con `python -m motor 
 # Entradas además de las alturas e Itaipú (ver mejoras.py; se decide con `python -m motor mejorar`):
 #   brasil = represas del ONS, ríos de la ANA y Salto Grande · lluvia = lluvia caída por zona · futuro = lluvia pronosticada
 ENTRADAS_CAL = {"brasil": True, "lluvia": True, "futuro": True, "max": 12}
-PESO_CAL = 0.0   # peso extra de los días de crecida al calibrar (4 no mejoró en la prueba)
+PESO_CAL = 0.0   # peso extra de los días de crecida al calibrar (4 no mejoró en la prueba; 2 tampoco, nov. 2026)
+CORTO_K = 4      # horizontes que salen del modelo sin lluvia pronosticada (0 = desactivado)
 
 
 def historia():
@@ -371,9 +377,19 @@ def calibrar():
                 extras[k] = {**m, "futuro": m["tipo"] == "lluvia" and ENTRADAS_CAL["futuro"]}
     MO.MAX_ENTRADAS, MO.PESO_CRECIDA = ENTRADAS_CAL["max"], PESO_CAL
     modelo = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CAL, extras=extras)
+    # Modelo corto (días 1..CORTO_K): el mismo ajuste SIN lluvia pronosticada. Prueba fuera de muestra 2022-2026
+    # (calibrado hasta 2021): error a 1 día 17,7 cm contra 19,1; cruces detectados con 1 día de anticipación 80 %
+    # contra 72 %; falsas alarmas 23 % contra 27 %. Desde el día 5 sigue mandando el modelo con lluvia pronosticada.
+    if CORTO_K:
+        ex_corto = {k: ({**v, "futuro": False} if isinstance(v, dict) else v) for k, v in extras.items()}
+        corto = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CAL, extras=ex_corto, log=lambda *a: None)
+        for k, v in modelo.items():
+            if k in corto:
+                v["corto"] = {**corto[k], "k": CORTO_K}
     hoy = dt.date.today().isoformat()
-    supa.upsert("sige_hidro_modelo", [{"estacion_id": int(k), "calibrado": hoy, "sube_7d": SUBE_7D, **v} for k, v in modelo.items()], "estacion_id")
-    print("calibrar:", len(modelo), "puertos con modelo")
+    supa.upsert("sige_hidro_modelo", [{"estacion_id": int(k), "calibrado": hoy, "sube_7d": SUBE_7D, "corto": None, **v}
+                                      for k, v in modelo.items()], "estacion_id")
+    print("calibrar:", len(modelo), "puertos con modelo,", sum(1 for v in modelo.values() if v.get("corto")), "con modelo corto")
 
 
 # ---------------------------------------------------------------- GloFAS en modo prueba (el portal no lo usa)
@@ -601,15 +617,31 @@ def prono_ina():
     print(f"prono_ina: {len(filas)} valores de {len({f['estacion_id'] for f in filas})} puertos")
 
 
-def _calcular(S, modelo, sube_7d):
+def _ultimas():
+    """{estacion_id: (momento, altura)} última lectura de Prefectura de cada puerto (sige_hidro_ultima)."""
+    from . import supa
+    out = {}
+    try:
+        for r in supa.select("sige_hidro_ultima", {"select": "estacion_id,fecha,hora,altura_m"}):
+            if r.get("fecha") and r.get("hora") and r.get("altura_m") is not None:
+                hh, mm = (int(x) for x in str(r["hora"])[:5].split(":"))
+                out[r["estacion_id"]] = (base.medianoche(r["fecha"]) + dt.timedelta(hours=hh, minutes=mm), float(r["altura_m"]))
+    except Exception as ex:
+        print("pronostico: sin lecturas intradiarias de Prefectura:", str(ex)[:120])
+    return out
+
+
+def _calcular(S, modelo, sube_7d, ultimas=None):
     emitido = dt.datetime.now(base.ART).isoformat(timespec="minutes")
+    ultimas = ultimas or {}
     pron, cru = [], []
     for e in estaciones():
         proy = proyeccion.proyectar(S, modelo, e["id"], sube_7d)
         if not proy:
             continue
         pron += [{"estacion_id": e["id"], "emitido": emitido, "dato_fecha": max(S[e["id"]]), **q} for q in proy]
-        for ev in (proyeccion.cruces(S[e["id"]], proy, e["alerta"], e["evac"]) if e["alerta"] is not None and e["evac"] is not None else []):
+        for ev in (proyeccion.cruces(S[e["id"]], proy, e["alerta"], e["evac"], ultimas.get(e["id"]))
+                   if e["alerta"] is not None and e["evac"] is not None else []):
             # PostgREST exige las mismas columnas en todas las filas de un lote
             fila = {"estacion_id": e["id"], "emitido": emitido, **{k: None for k in COLUMNAS_CRUCE}}
             fila.update({k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in ev.items()})
@@ -644,7 +676,7 @@ def pronostico():
         S.update(mejoras.entradas((dt.date.today() - dt.timedelta(days=75)).isoformat(), telemetria_dias=12,
                                   reciente=True, bajar=False))
     sube = filas[0]["sube_7d"] if filas else 0.15
-    pron, cru = _calcular(S, modelo, sube)
+    pron, cru = _calcular(S, modelo, sube, _ultimas())
     if not pron:   # p. ej. modelos de un formato viejo: se deja el último pronóstico en vez de dejar el portal vacío
         print("pronostico: ningún puerto pudo proyectarse (¿falta recalibrar?); queda el pronóstico anterior")
         return
