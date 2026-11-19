@@ -35,7 +35,21 @@ ZONAS = {1031: ("alto", "URUGUAY", [(-27, -52), (-27.8, -51)], "Lluvia Alto Urug
          1042: ("parana_br", "PARANA", [(-23.8, -52.5), (-22.8, -51.5), (-24.6, -53.6)], "Lluvia Paraná brasileño (Ivaí / Paranapanema)"),
          1043: ("paraguay", "PARANA", [(-25.5, -57.0), (-24.0, -56.5)], "Lluvia Paraguay oriental"),
          1044: ("nea", "PARANA", [(-27.5, -58.5), (-28.5, -59.5), (-29.5, -58.3)], "Lluvia Corrientes / Chaco"),
-         1045: ("litoral", "PARANA", [(-31.0, -60.5), (-31.5, -59.5)], "Lluvia Santa Fe / Entre Ríos")}
+         1045: ("litoral", "PARANA", [(-31.0, -60.5), (-31.5, -59.5)], "Lluvia Santa Fe / Entre Ríos"),
+         # río Salado (nov. 2026): una zona por subcuenca entre gauges (HydroBASINS nivel 8, ver datos/cuencas_salado.json)
+         1051: ("sal01", "SALADO", [(-27.25, -66.25), (-26.25, -65.75), (-25.25, -66.25), (-25.25, -64.75), (-24.25, -65.75)], "Lluvia Alto Juramento-Pasaje (Salta)"),
+         1052: ("sal02", "SALADO", [(-26.25, -63.75), (-25.75, -64.25), (-25.25, -64.25)], "Lluvia Juramento medio (El Tunal → El Arenal)"),
+         1053: ("sal03", "SALADO", [(-28.25, -63.25), (-26.75, -64.25), (-25.75, -64.75)], "Lluvia Salado santiagueño alto (El Arenal → Suncho Corral)"),
+         1054: ("sal04", "SALADO", [(-28.25, -62.75), (-27.25, -62.75), (-25.75, -63.75)], "Lluvia Santiago del Estero oeste (hacia Añatuya)"),
+         1055: ("sal05", "SALADO", [(-28.88, -62.62), (-28.62, -62.88), (-28.62, -62.62)], "Lluvia Salado santiagueño bajo (Suncho Corral → Icaño)"),
+         1056: ("sal06", "SALADO", [(-29.62, -61.88), (-29.38, -61.38), (-28.88, -62.38)], "Lluvia Salado entre Icaño y Tostado (Pinto)"),
+         1057: ("sal07", "SALADO", [(-29.75, -60.75), (-28.75, -61.25), (-28.25, -60.75), (-27.25, -61.75), (-25.75, -63.25)], "Lluvia Bajos Submeridionales norte"),
+         1058: ("sal08", "SALADO", [(-30.25, -61.75), (-30.25, -60.75), (-29.75, -61.25)], "Lluvia afluentes del oeste santafesino (Tostado → San Justo)"),
+         1059: ("sal09", "SALADO", [(-30.62, -60.62), (-29.88, -60.62), (-29.38, -60.38)], "Lluvia Calchaquí - Golondrinas y bajos del este"),
+         1060: ("sal10", "SALADO", [(-31.12, -60.88), (-30.62, -60.88), (-30.38, -61.38)], "Lluvia Salado entre San Justo y Emilia"),
+         1061: ("sal11", "SALADO", [(-31.25, -61.75), (-30.75, -61.75), (-30.75, -61.25)], "Lluvia arroyo Cululú"),
+         1062: ("sal12", "SALADO", [(-31.88, -60.88), (-31.62, -60.88), (-31.38, -60.88)], "Lluvia Salado inferior (Emilia → Recreo → Santo Tomé)")}
+ZONAS_POR_CORRIDA = 4   # zonas de lluvia nuevas (historia ERA5 completa) que se bajan como mucho en una corrida
 ESCALA_LLUVIA = 100.0   # mm → décimas de metro: 100 mm acumulados = 1 unidad (del orden de las alturas)
 
 
@@ -165,8 +179,20 @@ def lluvia_diaria(desde, reciente=False, bajar=True):
             faltan[nombre] = (desde, pts)
         elif max(s) < hasta:
             faltan[nombre] = ((dt.date.fromisoformat(max(s)) + dt.timedelta(days=1)).isoformat(), pts)
+    # una zona nueva baja varios años de ERA5 (pesado para Open-Meteo): como mucho ZONAS_POR_CORRIDA zonas nuevas por
+    # corrida, y si una falla (p. ej. límite de pedidos) se sigue sin ella y se completa en la próxima calibración
+    nuevas = 0
     for nombre, (d0, pts) in (faltan.items() if bajar else []):
-        nuevo = _era5({nombre: pts}, d0, hasta)[nombre]
+        larga = d0 <= desde
+        if larga and nuevas >= ZONAS_POR_CORRIDA:
+            print(f"mejoras: lluvia ERA5 {nombre} queda para la próxima corrida")
+            continue
+        nuevas += larga
+        try:
+            nuevo = _era5({nombre: pts}, d0, hasta)[nombre]
+        except Exception as ex:
+            print(f"mejoras: lluvia ERA5 {nombre} sin bajar ({str(ex)[:100]}); se reintenta en la próxima corrida")
+            continue
         supa.upsert("sige_hidro_lluvia", [{"zona": nombre, "fecha": f, "mm": round(v, 2), "tipo": "era5",
                                            "actualizado": dt.date.today().isoformat()} for f, v in nuevo.items()], "zona,fecha,tipo")
         R[nombres[nombre]].update(nuevo)

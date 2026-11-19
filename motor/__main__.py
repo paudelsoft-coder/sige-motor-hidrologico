@@ -45,7 +45,7 @@ def _prefectura(fallos):
     sige_hidro_ultima (la "altura actual" del portal) y devuelve todas para completar la serie diaria (00 h)."""
     from . import prefectura, supa
     try:
-        lec = prefectura.lecturas(estaciones())
+        lec = prefectura.lecturas([e for e in estaciones() if not e.get("red")])   # el Salado no está en Prefectura
     except Exception as ex:
         fallos.append(f"Prefectura: {ex}")
         return []
@@ -635,13 +635,19 @@ def _calcular(S, modelo, sube_7d, ultimas=None):
     emitido = dt.datetime.now(base.ART).isoformat(timespec="minutes")
     ultimas = ultimas or {}
     pron, cru = [], []
-    for e in estaciones():
-        proy = proyeccion.proyectar(S, modelo, e["id"], sube_7d)
+    proys = {}
+    # primero las estaciones con modelo propio; después las derivadas (siguen a otra por remanso, p. ej. Santo Tomé)
+    for e in sorted(estaciones(), key=lambda x: bool(x.get("derivada"))):
+        if e.get("derivada"):
+            proy = proyeccion.derivar(S, e, proys)
+        else:
+            proy = proyeccion.proyectar(S, modelo, e["id"], sube_7d)
         if not proy:
             continue
+        proys[e["id"]] = proy
         pron += [{"estacion_id": e["id"], "emitido": emitido, "dato_fecha": max(S[e["id"]]), **q} for q in proy]
         for ev in (proyeccion.cruces(S[e["id"]], proy, e["alerta"], e["evac"], ultimas.get(e["id"]))
-                   if e["alerta"] is not None and e["evac"] is not None else []):
+                   if e["alerta"] is not None or e["evac"] is not None else []):
             # PostgREST exige las mismas columnas en todas las filas de un lote
             fila = {"estacion_id": e["id"], "emitido": emitido, **{k: None for k in COLUMNAS_CRUCE}}
             fila.update({k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in ev.items()})

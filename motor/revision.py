@@ -24,6 +24,9 @@ CRECIDAS = {
     "URUGUAY": {1959: "1959", 1972: "1972", 1983: "1983", 1990: "1990", 1992: "1992", 1997: "1997-98",
                 1998: "1997-98", 2002: "2002", 2009: "2009-10", 2010: "2009-10", 2014: "2014", 2015: "2015-16",
                 2016: "2015-16", 2017: "2017", 2019: "2019", 2023: "2023-24", 2024: "2023-24"},
+    # río Salado: crecidas de 2003 (Santa Fe), 2007, 2014-2016 (Recreo 1886 m³/s en abril de 2014) y 2019
+    "SALADO": {1973: "1973", 1998: "1998", 2003: "2003", 2007: "2007", 2014: "2014", 2015: "2015-16",
+               2016: "2015-16", 2019: "2019"},
 }
 D0 = dt.date(1900, 1, 1)
 
@@ -54,6 +57,8 @@ class Informe:
 
 
 def _cuenca(e):
+    if e.get("cuenca"):
+        return e["cuenca"]
     return "URUGUAY" if e["rio"].startswith("Uruguay") else "PARANA"
 
 
@@ -194,7 +199,7 @@ def auditar(est, borrar=False):
             conf = [_confirma(f, limpia.get(u["id"]), _p(limpia.get(u["id"]) or {}, .97)) for u in vec]
             conf_ok = any(c for c in conf if c)
             sin_vec = all(c is None for c in conf)
-            conocida = CRECIDAS[_cuenca(e)].get(int(f[:4]))
+            conocida = CRECIDAS.get(_cuenca(e), {}).get(int(f[:4]))
             marca = ("★" if conocida else "") + ("✔" if conf_ok else ("·" if sin_vec else "?"))
             txt.append(f"{f} {v:.2f} {marca}")
             if not conf_ok and not sin_vec and not conocida:
@@ -400,7 +405,8 @@ REGIONES = [("Iguazú y Alto Paraná", lambda r: r["orden"] < 7),
             ("Delta y Gualeguay", lambda r: 28.2 < r["orden"] < 100),
             ("Alto Uruguay (El Soberbio–Santo Tomé)", lambda r: 100 <= r["orden"] < 102.5),
             ("Uruguay medio (Alvear–Mocoretá)", lambda r: 102.5 <= r["orden"] < 106.8),
-            ("Bajo Uruguay (Salto Grande–Gualeguaychú)", lambda r: r["orden"] >= 106.8)]
+            ("Bajo Uruguay (Salto Grande–Gualeguaychú)", lambda r: 106.8 <= r["orden"] < 200),
+            ("Río Salado (Santiago del Estero y Santa Fe)", lambda r: r["orden"] >= 200)]
 
 
 def comparar(est, S, variantes, folds, cal_mod, guardar_mejor=None):

@@ -53,9 +53,11 @@ def proyectar(series, modelo, est_id, sube_7d=0.15):
     M = modelo.get(str(est_id)) or modelo.get(est_id)
     largo = _proyectar(series, M, est_id, sube_7d)
     corto = M.get("corto") if M else None
-    if not largo or not corto:
+    if not corto:
         return largo
     c = _proyectar(series, corto, est_id, sube_7d)
+    if not largo:
+        return c          # sin lluvia pronosticada (Open-Meteo caído): los 15 días salen del modelo corto
     if not c:
         return largo
     k_corto = int(corto.get("k") or 4)
@@ -223,6 +225,8 @@ def cruces(serie, proy, alerta, evac, ultima=None):
     horas = lambda a, b: (b - a).total_seconds() / UNA_HORA
     eventos = []
     for nivel, nombre in ((alerta, "ALERTA"), (evac, "EVACUACION")):
+        if nivel is None:          # p. ej. el Salado: tiene alerta técnica pero no nivel de evacuación oficial
+            continue
         if h0 >= nivel:
             ref = ultima[0] if ultima else medianoche(f0)
             baja = _pasa(centro, nivel, False, despues=ref)
@@ -247,3 +251,51 @@ def cruces(serie, proy, alerta, evac, ultima=None):
             if quizas is not None:
                 eventos.append({"nivel": nombre, "tipo": "POSIBLE", "umbral": nivel, "momento": quizas})
     return eventos
+
+
+# ------------------------------------------------------------------------------- estaciones derivadas (remanso)
+def derivar(series, e, proys):
+    """Pronóstico de una estación que sigue a otra (campo "derivada" de estaciones.json), p. ej. Santo Tomé sobre el
+    río Salado, que sube y baja con el Paraná por remanso:  h = a + b · base + Σ c · otra.
+    Se pronostica con el pronóstico de la base (y de las otras, o su último dato si no tienen) y se corrige con el
+    desvío de hoy entre lo leído y la fórmula, que se diluye con `tau_dias`. Banda = banda de la base × b más los
+    cuantiles 10/90 % del error de la fórmula (err[k])."""
+    D = e.get("derivada") or {}
+    s = series.get(e["id"])
+    base = proys.get(D.get("base"))
+    if not s or not base:
+        return None
+    t = max(s)
+    sb = series.get(D["base"]) or {}
+    if not sb:
+        return None
+    hb = sb.get(t, sb[max(sb)])
+
+    def otra(k_id, k):
+        p = proys.get(int(k_id))
+        if p and k <= len(p):
+            return p[k - 1]["central"]
+        so = series.get(int(k_id)) or {}
+        return so[max(so)] if so else None
+
+    hoy_o = [((series.get(int(i)) or {}).get(t), c) for i, c in (D.get("otras") or {}).items()]
+    if any(v is None for v, _ in hoy_o):
+        hoy_o = [(0.0, 0.0)]
+    formula_hoy = D["a"] + D["b"] * hb + sum(c * v for v, c in hoy_o)
+    desvio = s[t] - formula_hoy
+    tau = float(D.get("tau_dias") or 10)
+    err = D.get("err") or []
+    out = []
+    for q in base:
+        k = q["k"]
+        otras = [(otra(i, k), c) for i, c in (D.get("otras") or {}).items()]
+        if any(v is None for v, _ in otras):
+            otras = [(0.0, 0.0)]
+        c = D["a"] + D["b"] * q["central"] + sum(cc * v for v, cc in otras) + desvio * math.exp(-k / tau)
+        e10, e90 = (err[k - 1] if k <= len(err) else (err[-1] if err else (0.0, 0.0)))
+        lo = c + (D["b"] * (q["min"] - q["central"]) if q.get("min") is not None else 0.0) + e10
+        hi = c + (D["b"] * (q["max"] - q["central"]) if q.get("max") is not None else 0.0) + e90
+        out.append({"k": k, "fecha": q["fecha"], "central": round(c, 2), "min": round(lo, 2), "max": round(hi, 2),
+                    "sube": q.get("sube", False)})
+    return out
+

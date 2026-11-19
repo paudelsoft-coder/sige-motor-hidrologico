@@ -53,6 +53,11 @@ def cuencas():
     return json.load(open(os.path.join(RAIZ, "datos", "cuencas.json"), encoding="utf-8"))["cuencas"]
 
 
+def cuencas_salado():
+    p = os.path.join(RAIZ, "datos", "cuencas_salado.json")
+    return json.load(open(p, encoding="utf-8"))["cuencas"] if os.path.exists(p) else []
+
+
 def cuencas_ext():
     p = os.path.join(RAIZ, "datos", "cuencas_ext.json")
     return json.load(open(p, encoding="utf-8"))["cuencas"] if os.path.exists(p) else []
@@ -75,13 +80,14 @@ def _get(url, intentos=5):
             raise
 
 
-def _bajar(puntos, pasados=14, capas=("soil_moisture_9_to_27cm",)):
-    """[(lat, lng)] → [{fecha: (mm, {capa: θ medio del día})}] en el mismo orden."""
+def _bajar(puntos, pasados=14, capas=("soil_moisture_9_to_27cm",), temperaturas=False):
+    """[(lat, lng)] → [{fecha: (mm, {capa: θ medio del día}[, (t máx, t mín)])}] en el mismo orden."""
     out = []
     for i in range(0, len(puntos), LOTE):
         p = puntos[i:i + LOTE]
         q = {"latitude": ",".join(str(a) for a, _ in p), "longitude": ",".join(str(b) for _, b in p),
-             "daily": "precipitation_sum", "hourly": ",".join(capas), "past_days": pasados, "forecast_days": 16,
+             "daily": "precipitation_sum" + (",temperature_2m_max,temperature_2m_min" if temperaturas else ""),
+             "hourly": ",".join(capas), "past_days": pasados, "forecast_days": 16,
              "timezone": "America/Argentina/Buenos_Aires"}
         r = _get(URL + "?" + urllib.parse.urlencode(q))
         for x in (r if isinstance(r, list) else [r]):
@@ -91,8 +97,11 @@ def _bajar(puntos, pasados=14, capas=("soil_moisture_9_to_27cm",)):
                     if v is not None:
                         th.setdefault(t[:10], {}).setdefault(capa, []).append(v)
             d = {}
-            for f, mm in zip(x["daily"]["time"], x["daily"]["precipitation_sum"]):
+            tx, tn = x["daily"].get("temperature_2m_max"), x["daily"].get("temperature_2m_min")
+            for j, (f, mm) in enumerate(zip(x["daily"]["time"], x["daily"]["precipitation_sum"])):
                 d[f] = (mm, {c: sum(v) / len(v) for c, v in th.get(f, {}).items() if v})
+                if temperaturas:
+                    d[f] += ((tx[j] if tx else None, tn[j] if tn else None),)
             out.append(d)
         time.sleep(2)
     return out
@@ -159,6 +168,10 @@ def _fila(c, mios, hoy, ext):
 def calcular(hoy=None):
     hoy = hoy or dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).date().isoformat()
     filas = []
+    try:
+        filas += salado(hoy)
+    except Exception as ex:   # el Salado es un agregado: si falla, las demás cuencas se guardan igual
+        print("cuencas del Salado: sin actualizar:", ex)
     for grupo, ext in ((cuencas(), False), (cuencas_ext(), True)):
         if not grupo:
             continue
@@ -177,3 +190,77 @@ def calcular(hoy=None):
             j += len(c["puntos"])
             filas.append(_fila(c, mios, hoy, ext))
     return filas
+
+
+# ------------------------------------------------------------------- río Salado: modelo lluvia-caudal calibrado
+PASADOS_SALADO = 92   # días de lluvia pasada de Open-Meteo (el máximo que da)
+PREVIOS_SALADO = 430  # días de ERA5 antes de eso para calentar el modelo
+
+
+def salado(hoy):
+    """Filas de las subcuencas del Salado con el aporte calculado con GR4J (motor/escorrentia.py) en lugar del
+    coeficiente fijo, más una fila SAL-TOTAL con el caudal estimado que llega a Recreo día por día."""
+    from . import escorrentia as ES
+    grupo = cuencas_salado()
+    if not grupo:
+        return []
+    puntos = [tuple(p) for c in grupo for p in c["puntos"]]
+    datos = _bajar(puntos, pasados=PASADOS_SALADO, capas=CAPAS_EXT, temperaturas=True)
+    # "calentamiento" del modelo: ~14 meses de lluvia ERA5 de la zona del motor (sige_hidro_lluvia, mejoras.ZONAS
+    # 1051-1062) antes de los 92 días de Open-Meteo; el suelo de un bañado tiene memoria de meses.
+    try:
+        from . import mejoras
+        desde = (dt.date.fromisoformat(hoy) - dt.timedelta(days=PREVIOS_SALADO)).isoformat()
+        historia = mejoras.lluvia_diaria(desde, reciente=False, bajar=False)
+    except Exception as ex:
+        print("cuencas del Salado: sin ERA5 para calentar el modelo (se usan 92 días):", str(ex)[:120])
+        historia = {}
+    filas, llega, j = [], {}, 0
+    for c in grupo:
+        mios = datos[j:j + len(c["puntos"])]
+        j += len(c["puntos"])
+        fila = _fila(c, mios, hoy, True)
+        recientes = sorted({f for d in mios for f in d})
+        previas = sorted(f for f in (historia.get(c.get("zona_lluvia")) or {}) if f < recientes[0])
+        fechas = previas + recientes
+        P = [historia[c["zona_lluvia"]][f] for f in previas] + [_media([d[f][0] for d in mios if f in d]) or 0.0 for f in recientes]
+        E = [c["etp_mes"][int(f[5:7]) - 1] for f in previas]
+        for f in recientes:
+            tx = _media([d[f][2][0] for d in mios if f in d and len(d[f]) > 2])
+            tn = _media([d[f][2][1] for d in mios if f in d and len(d[f]) > 2])
+            e = ES.hargreaves(tx, tn, c["lat"], dt.date.fromisoformat(f).timetuple().tm_yday)
+            E.append(e if e is not None else c["etp_mes"][int(f[5:7]) - 1])
+        g = c["gr4j"]
+        s0 = c["s0_mes"][dt.date.fromisoformat(fechas[0]).month - 1]
+        Q, llenado = ES.gr4j(P, E, g["x1"], g["x2"], g["x3"], g["x4"], s0=s0)
+        q = [x * c["area_km2"] / 86.4 for x in Q]                                     # m³/s a la salida
+        qr = [x * (1 - c["perdida"]) for x in ES.transitar(q, c["viaje_dias"], c["k_dias"])]   # lo que llega a Recreo
+        i_hoy = sum(1 for f in fechas if f < hoy)
+        pas, fut = q[:i_hoy], q[i_hoy:]
+        fila["aporte_real_m3s"] = round(pas[-1]) if pas else None
+        fila["aporte_7d_m3s"] = round(sum(pas[-7:]) / max(1, len(pas[-7:]))) if pas else None
+        fila["aporte_pron7d_m3s"] = round(sum(fut[:7]) / max(1, len(fut[:7]))) if fut else None
+        fila["ventana_dias"] = 7
+        por_fecha = {f: (round(a, 1), round(b, 1), round(s, 2)) for f, a, b, s in zip(fechas, q, qr, llenado)}
+        for it in fila["serie"]:
+            if it["f"] in por_fecha:
+                it["q"], it["qr"], it["gr"] = por_fecha[it["f"]]
+        for f, b in zip(fechas, qr):
+            llega[f] = llega.get(f, 0.0) + b
+        filas.append(fila)
+    total = sum(c["area_km2"] for c in grupo)
+    fechas = sorted(llega)
+    pas = [llega[f] for f in fechas if f < hoy]
+    fut = [llega[f] for f in fechas if f >= hoy]
+    filas.append({
+        "cuenca": "SAL-TOTAL", "nombre": "Río Salado · caudal estimado que llega a Recreo (RP 70)",
+        "subsistema": "Paraná-Paraguay", "puerto_id": 210, "area_km2": total, "pais": "Argentina",
+        "lluvia_3d": None, "lluvia_7d": None, "lluvia_14d": None, "lluvia_30d": None, "pron_3d": None, "pron_7d": None,
+        "pron_16d": None, "suelo": None, "suelo_sup": None, "suelo_prof": None,
+        "aporte_7d_m3s": round(sum(pas[-7:]) / max(1, len(pas[-7:]))) if pas else None,
+        "aporte_pron7d_m3s": round(sum(fut[:7]) / max(1, len(fut[:7]))) if fut else None,
+        "aporte_real_m3s": round(pas[-1]) if pas else None, "ventana_dias": 7, "viaje_min": None, "viaje_max": None,
+        "puntos": 0, "serie": [{"f": f, "qr": round(llega[f], 1)} for f in fechas[-46:]],
+        "actualizado": dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes")})
+    return filas
+

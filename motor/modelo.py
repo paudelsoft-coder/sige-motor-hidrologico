@@ -33,6 +33,9 @@ ITAIPU_ID = 1000
 
 
 def cuenca(e):
+    """Sistema al que pertenece una estación: PARANA, URUGUAY o el que indique su campo "cuenca" (p. ej. SALADO)."""
+    if e.get("cuenca"):
+        return e["cuenca"]
     return "URUGUAY" if e["rio"].startswith("Uruguay") else "PARANA"
 
 
@@ -159,8 +162,10 @@ def calibrar(estaciones, series, hasta, anios=3, log=print, extras=None):
         # columnas candidatas
         cols = []
         for u in est:
-            if cuenca(u) == cuenca(e) and u["orden"] <= e["orden"] and e["orden"] - u["orden"] <= VECINDAD \
-                    and np.isnan(A[u["id"]]).mean() < 0.4:
+            # misma cuenca y aguas arriba, o un "vecino" declarado (p. ej. el Paraná en Santa Fe para el Salado
+            # inferior, que sube por remanso cuando crece el Paraná)
+            if ((cuenca(u) == cuenca(e) and u["orden"] <= e["orden"] and e["orden"] - u["orden"] <= VECINDAD)
+                    or u["id"] in e.get("vecinos", ())) and np.isnan(A[u["id"]]).mean() < 0.4:
                 cols += [(u["id"], a, b) for a, b in DIFS]
         for k, x in extras.items():
             if np.isnan(A[k]).mean() >= 0.4:
