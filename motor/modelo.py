@@ -143,7 +143,7 @@ def _bandas(E, filas, minimo):
     return out
 
 
-def calibrar(estaciones, series, hasta, anios=3, log=print, extras=None):
+def calibrar(estaciones, series, hasta, anios=3, log=print, extras=None, solo=None):
     """{id: modelo sige2} para los puertos con un modelo mejor que la persistencia.
     `extras` = {id: nombre} (solo puertos del Paraná, ventanas al pasado) o {id: {nombre, cuenca, futuro}}."""
     est = [e for e in estaciones if not e.get("marea")]
@@ -156,6 +156,8 @@ def calibrar(estaciones, series, hasta, anios=3, log=print, extras=None):
     n = (hasta - d0).days + 1
     modelo = {}
     for e in sorted(est, key=lambda x: x["orden"]):
+        if solo is not None and e["id"] not in solo:     # `solo` = calibrar únicamente estas estaciones
+            continue
         h = A[e["id"]]
         if np.isnan(h).mean() > 0.4:
             log(f"{e['nombre']}: pocos datos, sin modelo"); continue

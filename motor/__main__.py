@@ -208,6 +208,7 @@ ANIOS_CAL = 7   # años de historia para calibrar (elegido con `python -m motor 
 #   brasil = represas del ONS, ríos de la ANA y Salto Grande · lluvia = lluvia caída por zona · futuro = lluvia pronosticada
 ENTRADAS_CAL = {"brasil": True, "lluvia": True, "futuro": True, "max": 12}
 PESO_CAL = 0.0   # peso extra de los días de crecida al calibrar (4 no mejoró en la prueba; 2 tampoco, nov. 2026)
+ANIOS_CORTO = 3   # años de calibración para puertos con huecos largos en la serie
 CORTO_K = 4      # horizontes que salen del modelo sin lluvia pronosticada (0 = desactivado)
 
 
@@ -386,6 +387,21 @@ def calibrar():
         for k, v in modelo.items():
             if k in corto:
                 v["corto"] = {**corto[k], "k": CORTO_K}
+    # Puertos con un hueco largo en la serie (p. ej. Campichuelo, sin datos del INA entre 2019 y 2023) no llegan al
+    # 60 % de días con dato en ANIOS_CAL años: se calibran con los últimos ANIOS_CORTO años en vez de quedarse con un
+    # modelo viejo o sin modelo.
+    if ANIOS_CAL > ANIOS_CORTO:
+        faltan = {e["id"] for e in estaciones() if str(e["id"]) not in modelo
+                  and not e.get("marea") and not e.get("derivada")}
+        if faltan:
+            extra = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CORTO, extras=extras, solo=faltan)
+            if CORTO_K and extra:
+                ec = cal(estaciones(), S, dt.date.today(), anios=ANIOS_CORTO, extras=ex_corto, log=lambda *a: None, solo={int(k) for k in extra})
+                for k, v in extra.items():
+                    if k in ec:
+                        v["corto"] = {**ec[k], "k": CORTO_K}
+            modelo.update(extra)
+            print(f"calibrar: {len(extra)} de {len(faltan)} puertos sin datos suficientes en {ANIOS_CAL} años se calibraron con {ANIOS_CORTO}")
     hoy = dt.date.today().isoformat()
     supa.upsert("sige_hidro_modelo", [{"estacion_id": int(k), "calibrado": hoy, "sube_7d": SUBE_7D, "corto": None, **v}
                                       for k, v in modelo.items()], "estacion_id")
