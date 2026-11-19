@@ -181,6 +181,8 @@ def calcular(hoy=None):
     for grupo, ext in ((cuencas(), False), (cuencas_ext(), True)):
         if not grupo:
             continue
+        if ext:   # malla de 0,5° raleada (1 de cada PASO_EXT puntos): Open-Meteo cobra por punto y por día pedido
+            grupo = [{**c, "puntos": c["puntos"][::PASO_EXT] or c["puntos"][:1]} for c in grupo]
         puntos = [tuple(p) for c in grupo for p in c["puntos"]]
         try:
             datos = (_bajar(puntos, pasados=PASADOS_GR4J, capas=CAPAS_EXT, temperaturas=True) if ext
@@ -205,7 +207,7 @@ def calcular(hoy=None):
 
 
 # ------------------------------------------------------------------- río Salado: modelo lluvia-caudal calibrado
-PASADOS_SALADO = 92   # días de lluvia pasada de Open-Meteo (el máximo que da)
+PASADOS_SALADO = 60   # días de lluvia pasada de Open-Meteo (antes, ERA5 guardado)
 PREVIOS_SALADO = 430  # días de ERA5 antes de eso para calentar el modelo
 
 
@@ -280,7 +282,8 @@ def salado(hoy):
 
 
 # ------------------------------------------------- aporte con GR4J regionalizado (todas las cuencas salvo el Salado)
-PASADOS_GR4J = 45   # días de lluvia pasada para "calentar" el modelo (ver la prueba en datos/gr4j_regiones.json)
+PASADOS_GR4J = 30   # días de lluvia pasada para "calentar" el modelo (Uruguay: error < 5 % con 30 días; Iguazú/Itá ~15 %)
+PASO_EXT = 3        # cuencas de afuera: se usa 1 de cada 3 puntos de la malla (≈ 250 de 757); el promedio casi no cambia
 
 
 def _gr4j_fila(fila, c, mios, hoy, gr):
